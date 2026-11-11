@@ -108,7 +108,7 @@ job discards its clips and runs it again with the new options.
   "analysis": {
     "engine": "heuristic", "mode": "speech", "language": "en",
     "transcription": "faster-whisper:small", "words": 354, "candidates": 263,
-    "requested": 4, "selected": 4, "min_score": 58.0, "best_candidate_score": 85.1,
+    "requested": 4, "selected": 4, "min_score": 60.0, "best_candidate_score": 85.1,
     "llm": {"used": false}, "warnings": []
   },
   "expires_at": "2026-11-12T03:21:40Z",

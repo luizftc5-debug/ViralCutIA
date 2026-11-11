@@ -45,7 +45,7 @@ function TimeField({ label, value, min, max, onChange }: { label: string; value:
         </button>
         <input
           type="number"
-          step={0.1}
+          step="any"
           min={min}
           max={max}
           value={value}
@@ -227,6 +227,7 @@ export default function ClipStudioPage() {
 
           <form
             className="space-y-12"
+            noValidate /* clip boundaries are validated here and by the API; native step checks reject valid times like 18.369 */
             onSubmit={(e) => {
               e.preventDefault();
               void save();

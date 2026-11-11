@@ -29,7 +29,7 @@ export default function NewVideoPage() {
   const [startError, setStartError] = useState("");
 
   const set = <K extends keyof JobOptions>(key: K, v: JobOptions[K]) => setOptions((o) => ({ ...o, [key]: v }));
-  const minScoreDefault = upload.config?.engine.min_score ?? 58;
+  const minScoreDefault = upload.config?.engine.min_score ?? 60;
 
   const generate = async () => {
     if (!upload.job) return;

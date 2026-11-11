@@ -55,7 +55,7 @@ first sentence depends on earlier context ("And…", "Because…", "Ele…").
 * Value is an average over sentences, so filler dilutes it and length alone earns nothing.
 * Selection is greedy non-maximum suppression: at most 8% temporal overlap with an already chosen
   clip, and TF-IDF cosine similarity below 0.55 (the same story told twice is kept once).
-* Clips below the minimum score (`VIRALCUT_MIN_SCORE`, default 58, adjustable per job) are not
+* Clips below the minimum score (`VIRALCUT_MIN_SCORE`, default 60, adjustable per job) are not
   rendered. Fewer, better clips are preferred to a padded list.
 
 ## Engines and their labels

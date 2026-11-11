@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     llm_max_candidates: int = 24
 
     # --- selection
-    min_score: float = 58.0
+    min_score: float = 60.0
     max_clips: int = 20
 
     # --- rendering

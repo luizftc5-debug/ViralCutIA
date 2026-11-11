@@ -96,7 +96,7 @@ matter most:
 |---|---|---|
 | `VIRALCUT_WHISPER_MODEL` | `small` | Speech model. `medium` / `large-v3` are more accurate and slower; use a GPU with `VIRALCUT_WHISPER_DEVICE=cuda` |
 | `ANTHROPIC_API_KEY` | unset | Enables LLM narrative rating and written titles. Only transcript text is sent |
-| `VIRALCUT_MIN_SCORE` | `58` | Clips below this score are not rendered |
+| `VIRALCUT_MIN_SCORE` | `60` | Clips below this score are not rendered |
 | `VIRALCUT_SCORE_WEIGHTS` | built in | JSON override of the six score weights |
 | `VIRALCUT_RETENTION_HOURS` | `24` | When uploads and clips are deleted |
 | `VIRALCUT_MAX_UPLOAD_MB` / `VIRALCUT_MAX_DURATION_S` | `2048` / `10800` | Upload limits |
@@ -181,6 +181,8 @@ These are real constraints of this version, stated so nobody is surprised by the
   where this was developed (no Docker daemon). The application itself was tested natively on
   SQLite and on PostgreSQL 16.
 * **CPU speed.** Processing is CPU-bound without a GPU; transcription dominates on long videos.
+  Measured on 4 CPU cores with the `small` model: a 2-minute 1080p video produced 4 clips in
+  about 1.5 minutes, and a 10-minute 1080p video produced 8 clips in 4 min 42 s.
 * The interface is in English only.
 
 ## Roadmap
