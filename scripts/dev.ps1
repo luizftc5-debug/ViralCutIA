@@ -79,14 +79,54 @@ $env:VIRALCUT_DATA_DIR = Join-Path $Root 'data'
 $env:VIRALCUT_EMBEDDED_WORKER = 'true'
 $env:PYTHONIOENCODING = 'utf-8'
 
-# 5. API in its own window, so its log stays visible.
+# 5. API. If port 8000 is taken, an old API (often from a previous run) is still alive.
+if (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue) {
+    Write-Host 'Port 8000 is already in use (an old API is probably still running).' -ForegroundColor Red
+    Write-Host 'Stop it with this command, then run this script again:' -ForegroundColor Yellow
+    Write-Host '  Get-NetTCPConnection -LocalPort 8000 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }'
+    exit 1
+}
+
+# The API log goes to data\api.err.log (the window is hidden); it is shown here if the API fails.
+New-Item -ItemType Directory -Force -Path $env:VIRALCUT_DATA_DIR | Out-Null
+$ApiOut = Join-Path $env:VIRALCUT_DATA_DIR 'api.out.log'
+$ApiErr = Join-Path $env:VIRALCUT_DATA_DIR 'api.err.log'
 $ApiProc = Start-Process -FilePath $VenvPy `
     -ArgumentList '-m', 'uvicorn', 'viralcut.api.app:app', '--host', '127.0.0.1', '--port', '8000' `
-    -WorkingDirectory $Api -PassThru
+    -WorkingDirectory $Api -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput $ApiOut -RedirectStandardError $ApiErr
+
+function Stop-Api {
+    # taskkill /T also stops the child python process that the venv launcher starts.
+    if ($ApiProc -and -not $ApiProc.HasExited) {
+        taskkill.exe /T /F /PID $ApiProc.Id | Out-Null
+    }
+}
+
+# Wait until the API answers (the first start can take 20-60 s: imports, antivirus, OneDrive).
+Write-Host 'Starting the API...' -ForegroundColor Cyan
+$ready = $false
+for ($i = 0; $i -lt 120; $i++) {
+    if ($ApiProc.HasExited) { break }
+    try {
+        $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8000/docs' -TimeoutSec 2
+        if ($r.StatusCode -eq 200) { $ready = $true; break }
+    } catch { }
+    Start-Sleep -Seconds 1
+}
+if (-not $ready) {
+    Write-Host 'The API did not start. Last lines of its log:' -ForegroundColor Red
+    foreach ($f in @($ApiErr, $ApiOut)) {
+        if (Test-Path $f) { Get-Content $f -Tail 40 }
+    }
+    Write-Host "Full logs: $ApiErr" -ForegroundColor Yellow
+    Stop-Api
+    exit 1
+}
 
 Write-Host ''
-Write-Host 'Open http://localhost:3000 in your browser (first job downloads the speech model, ~480 MB).' -ForegroundColor Green
-Write-Host 'Press Ctrl+C here to stop the web app; the API window is closed automatically.'
+Write-Host 'API is up. Open http://localhost:3000 in your browser (first job downloads the speech model, ~480 MB).' -ForegroundColor Green
+Write-Host 'API log: data\api.err.log. Press Ctrl+C here to stop everything.'
 Write-Host ''
 
 try {
@@ -94,8 +134,5 @@ try {
     npm.cmd run dev
 } finally {
     Pop-Location
-    # taskkill /T also stops the child python process that the venv launcher starts.
-    if ($ApiProc -and -not $ApiProc.HasExited) {
-        taskkill.exe /T /F /PID $ApiProc.Id | Out-Null
-    }
+    Stop-Api
 }
