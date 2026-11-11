@@ -51,7 +51,31 @@ and libass, as in the Debian, Ubuntu and Homebrew packages).
 ```
 
 That creates the Python environment, installs both apps, and starts the API with an embedded
-worker on port 8000 and the web app on port 3000. To run the pieces yourself:
+worker on port 8000 and the web app on port 3000. To check the prerequisites first:
+
+```bash
+python3 scripts/doctor.py
+```
+
+#### Windows (PowerShell, no Docker)
+
+1. Install [Python 3.12](https://www.python.org/downloads/) (tick "Add python.exe to PATH") and
+   [Node.js LTS](https://nodejs.org/).
+2. Install a **full** ffmpeg build that includes libx264 and libass, for example from
+   [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (`ffmpeg-release-full.7z`, or
+   `winget install Gyan.FFmpeg`). Add its `bin` folder to PATH and open a new PowerShell window.
+3. From the repository folder:
+
+```powershell
+copy .env.example .env
+powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
+```
+
+The script checks everything with `scripts\doctor.py`, creates `apps\api\.venv` and installs the
+dependencies on the first run, then opens http://localhost:3000. If `.venv` ends up broken, delete
+the `apps\api\.venv` folder and run the script again.
+
+To run the pieces yourself:
 
 ```bash
 cd apps/api && python3 -m venv .venv && .venv/bin/pip install -e ".[dev,llm]"

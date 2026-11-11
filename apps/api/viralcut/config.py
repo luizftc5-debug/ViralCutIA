@@ -12,7 +12,9 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="VIRALCUT_", env_file=".env", extra="ignore")
+    # Non-Docker runs start from apps/api, so also read the repository-root .env (copied from
+    # .env.example). Later files win; missing files are ignored, so Docker is unaffected.
+    model_config = SettingsConfigDict(env_prefix="VIRALCUT_", env_file=("../../.env", ".env"), extra="ignore")
 
     # --- storage / persistence
     data_dir: Path = Path("./data")
