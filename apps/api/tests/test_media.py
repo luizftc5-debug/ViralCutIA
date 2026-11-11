@@ -118,6 +118,21 @@ def test_no_face_falls_back_to_blur_and_modes_are_respected():
     assert centre["keys"][0][1] == (1920 - 608) // 2
 
 
+def test_plan_framing_handles_a_clip_without_any_shot_change(tmp_path):
+    """ffmpeg 7+ fails when the shot-change output receives no frames (a static clip)."""
+    import subprocess
+
+    src = tmp_path / "static.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=640x360:d=3:r=10"]
+        + ["-pix_fmt", "yuv420p", str(src)],
+        check=True,
+    )
+    info = probe(src)
+    plan = reframe.plan_framing(src, None, info, 0.0, info.duration, mode="auto")
+    assert plan.shots and plan.shots[0].layout["type"] in ("blur", "crop")
+
+
 def test_path_simplification_keeps_endpoints():
     t = np.linspace(0, 10, 51)
     keys = reframe.simplify(t, np.where(t < 5, 100.0, 100 + (t - 5) * 80), tolerance=5)
