@@ -64,7 +64,14 @@ def seeded(client):
     (d / "transcript.json").write_text(
         json.dumps({"language": "en", "engine": "test", "words": words, "quality": {}})
     )
-    return jid
+    yield jid
+    # the database and the worker are shared by the whole session: a seeded job that is still
+    # "queued" would be picked up by another test's worker
+    with session_scope() as s:
+        job = s.get(Job, jid)
+        if job is not None:
+            s.delete(job)
+    get_storage().delete_job(jid)
 
 
 def test_global_correction_requeues_only_clips_that_contain_it(client, seeded):
@@ -123,3 +130,53 @@ def test_cancel_works_while_waiting_for_review(client, seeded):
     with session_scope() as s:
         s.get(Job, seeded).status = "review"
     assert client.post(f"/api/jobs/{seeded}/cancel").json()["status"] == "canceled"
+
+
+def test_engine_decisions_are_explained_in_plain_language():
+    from viralcut.api.serializers import decision_notes
+
+    clip = Clip(
+        job_id="j",
+        start=0,
+        end=10,
+        framing={
+            "notes": ["captions placed in the blurred band so they do not cover the picture"],
+            "align": {"method": "ctc", "aligned": 40, "words": 42, "median_shift_s": 0.12},
+            "edit": {
+                "profile": {
+                    "name": "education",
+                    "evidence": ["education: 9 vocabulary hits (because, example)"],
+                },
+                "notes": ["removed 1.4s of silence (kept pauses up to 0.6 s)"],
+                "zooms": [
+                    {
+                        "t0": 6.9,
+                        "t1": 8.5,
+                        "amp": 0.072,
+                        "reason": "vocal emphasis",
+                        "evidence": {"word": "never", "lift_db": 9.2},
+                    }
+                ],
+                "audio": {"applied": ["high-pass 70 Hz"]},
+            },
+        },
+    )
+    text = " | ".join(decision_notes(clip))
+    assert "Content type: education" in text and "Punch-in 6.9-8.5s, 7%" in text and "“never”" in text
+    assert "40 of 42 words" in text and "+120 ms" in text and "Audio: high-pass 70 Hz." in text
+    assert decision_notes(Clip(job_id="j", start=0, end=1, framing={})) == []
+
+
+def test_browser_preflight_allows_every_method_the_studio_uses(client):
+    """The studio calls the API from another origin: a method missing from CORS fails only in a browser."""
+    for method in ("PUT", "PATCH", "POST", "DELETE"):
+        r = client.options(
+            "/api/jobs/x/transcript",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": method,
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert r.status_code == 200, f"preflight for {method} was refused"
+        assert method in r.headers["access-control-allow-methods"]

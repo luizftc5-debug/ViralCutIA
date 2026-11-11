@@ -127,6 +127,20 @@ size mapping libass uses (`unitsPerEm / (usWinAscent + usWinDescent)`), so lines
 never leave the platform safe area (a page that would overflow is scaled down, not clipped), and
 a word can be recoloured or animated without shifting its neighbours.
 
+Timing rules (constants at the top of `captions.py`): a page ends 0.18 s after its last word, is
+chained to the next page only when the pause between them is under 0.3 s, and stays at least 0.35 s.
+Nothing is on screen while nobody speaks. The line layout reserves the active word's *peak* animated
+size, so a very long word still stays inside the platform's side margins. When the whole clip uses the
+letterboxed `blur` layout, captions are anchored in the blurred band above or below the picture
+instead of over it (gameplay and screen recordings stay fully visible).
+
+Presets: **Viral Dynamic** (`viral_dynamic`: the spoken word lights up, keywords keep a second
+colour and scale up, pages slide in), **Creator High Retention** (`high_retention`: short
+word-by-word phrases), **Premium Minimal** (`clean_editorial`: quiet reveal, restrained movement),
+**Gaming / Entertainment** (`gaming`: oversized high-contrast words, placed clear of the gameplay) and
+the earlier **Dynamic Creator** highlight block. The studio preview is the rendered MP4 itself, so
+preview and export cannot differ.
+
 ## Storage layout
 
 ```

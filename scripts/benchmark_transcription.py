@@ -101,10 +101,11 @@ def main() -> None:
     os.environ.setdefault("VIRALCUT_DATA_DIR", str(Path("/tmp") / "viralcut-bench-data"))
 
     from viralcut.evaluation import top_errors, wer
-    from viralcut.pipeline.align import align_words, refine_with_energy
     from viralcut.pipeline.audio import analyze_audio, decode_audio
     from viralcut.pipeline.transcribe import transcribe
 
+    if args.align:  # absent in older revisions of the application
+        from viralcut.pipeline.align import align_words, refine_with_energy
     items = load_manifest(args)
     if args.only:
         items = [i for i in items if any(o in i.get("name", i["audio"]) for o in args.only.split(","))]
