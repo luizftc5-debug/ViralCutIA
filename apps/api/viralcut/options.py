@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .pipeline.editors import EditorsConfig
+
 CaptionStyle = Literal[
     "auto",  # the caption design of the clip's video style
     "viral_dynamic", "energy", "podcast", "kinetic", "clean_editorial", "gaming", "cinematic", "high_retention",
@@ -24,7 +26,8 @@ DURATION_RANGES: dict[str, tuple[float, float]] = {
     "60-90": (60.0, 90.0),
     "auto": (18.0, 75.0),
 }
-CUSTOM_LIMITS = (5.0, 180.0)
+CUSTOM_LIMITS = (5.0, 3600.0)  # up to 180 s for short-form, up to an hour for long-form YouTube
+SHORT_MAX_S = 180.0
 
 # Longest pause kept between words, per editing style (None = smart trimming disabled).
 TRIM_MAX_PAUSE: dict[str, float | None] = {
@@ -41,6 +44,7 @@ SAFE_AREAS: dict[str, dict[str, float]] = {
     "reels": {"top": 0.11, "bottom": 0.21, "side": 0.08},
     "tiktok": {"top": 0.10, "bottom": 0.22, "side": 0.09},
     "universal": {"top": 0.11, "bottom": 0.22, "side": 0.09},
+    "youtube": {"top": 0.07, "bottom": 0.11, "side": 0.07},  # 16:9 player: title bar and progress bar
 }
 
 LANGUAGES = {"auto", "en", "pt", "es", "fr", "de", "it", "ja", "ko", "zh", "hi", "ar", "ru", "nl", "tr", "pl"}
@@ -87,8 +91,10 @@ class JobOptions(BaseModel):
     duration: Literal["15-30", "30-60", "60-90", "auto", "custom"] = "auto"
     custom_min: float = Field(default=20.0, ge=CUSTOM_LIMITS[0], le=CUSTOM_LIMITS[1])
     custom_max: float = Field(default=45.0, ge=CUSTOM_LIMITS[0], le=CUSTOM_LIMITS[1])
-    platform: Literal["shorts", "reels", "tiktok", "universal"] = "universal"
-    aspect: Literal["9:16"] = "9:16"
+    platform: Literal["shorts", "reels", "tiktok", "universal", "youtube"] = "universal"
+    aspect: Literal["9:16", "16:9"] = "9:16"
+    # what is produced: short vertical clips, a long-form YouTube edit, or a ranked compilation
+    content_type: Literal["shorts", "tiktok", "reels", "youtube", "compilation"] = "shorts"
     style: VideoStyleKey = "auto"  # video style preset (pipeline/styles.py)
     intensity: Literal["subtle", "balanced", "high"] = "balanced"
     variations: int = Field(default=1, ge=1, le=3)  # versions rendered per selected clip
@@ -103,6 +109,9 @@ class JobOptions(BaseModel):
     )  # names / terms the recogniser should prefer, comma separated
     min_score: float | None = Field(default=None, ge=0, le=100)
     performance: Literal["auto", "eco", "balanced", "turbo"] = "auto"  # resource profile for this job
+    preset: str = Field(default="", max_length=40)  # Creator Studio preset applied (informative)
+    editors: EditorsConfig = Field(default_factory=EditorsConfig)  # the 13 specialised editors
+    growth: bool = True  # Creator Growth Toolkit: titles, description, keywords, chapters…
 
     @field_validator("glossary")
     @classmethod
@@ -130,6 +139,10 @@ class JobOptions(BaseModel):
     def _custom_range(self) -> JobOptions:
         if self.duration == "custom" and self.custom_max - self.custom_min < 5.0:
             raise ValueError("a custom clip length needs at least 5 seconds between minimum and maximum")
+        if self.duration == "custom" and self.content_type != "youtube" and self.custom_max > SHORT_MAX_S:
+            raise ValueError(
+                "short-form clips can be at most 180 seconds; choose YouTube long-form for longer edits"
+            )
         return self
 
     @property
@@ -137,6 +150,25 @@ class JobOptions(BaseModel):
         if self.duration == "custom":
             return (self.custom_min, self.custom_max)
         return DURATION_RANGES[self.duration]
+
+    @property
+    def output_aspect(self) -> str:
+        """16:9 for long-form YouTube; compilations follow ``aspect``; short platforms are 9:16."""
+        if self.content_type == "youtube":
+            return "16:9"
+        if self.content_type == "compilation":
+            return self.aspect
+        return "9:16"
+
+    @property
+    def caption_platform(self) -> str:
+        if self.output_aspect == "16:9":
+            return "youtube"
+        return (
+            {"shorts": "shorts", "tiktok": "tiktok", "reels": "reels"}.get(self.content_type, self.platform)
+            if self.platform == "universal"
+            else self.platform
+        )
 
     @property
     def video_style(self) -> str:

@@ -74,10 +74,11 @@ def analyze_visual(
     duration: float,
     on_progress: ProgressFn | None = None,
     should_cancel: CancelFn | None = None,
+    limit: float | None = None,
 ) -> VisualSignals:
     args = [
         "-skip_loop_filter", "all", "-skip_frame", "noref",
-        *input_args(path, family),
+        *input_args(path, family, duration=limit),
         "-an", "-sn", "-map", "0:v:0",
         "-vf", f"fps={ANALYSIS_FPS},scale={_W}:{_H}:flags=fast_bilinear,format=gray",
         "-f", "rawvideo",

@@ -38,9 +38,178 @@ class Segment:
     )  # (t0, t1, amp, ramp), output time
 
 
-def output_size(media: MediaInfo) -> tuple[int, int]:
-    """1080x1920 when the source can sustain it, otherwise 720x1280 (no fake upscaling to 'HD')."""
-    return (1080, 1920) if min(media.width, media.height) >= 700 else (720, 1280)
+@dataclass
+class ImageCard:
+    """/prova: an evidence image shown as a card between t0 and t1 (output timeline)."""
+
+    path: Path
+    t0: float
+    t1: float
+    input: int = -1
+
+
+@dataclass
+class MusicBed:
+    """/trilha: a user-supplied music file under the voice."""
+
+    path: Path
+    volume_db: float = -20.0
+    duck: bool = True
+    offset: float = 0.0  # seconds skipped at the start of the music (beat alignment)
+    input: int = -1
+
+
+@dataclass
+class Background:
+    """/tela-verde: what replaces the background."""
+
+    kind: str = "blur"  # blur | color | image
+    color: str = "#101820"
+    image: Path | None = None
+    input: int = -1
+
+
+@dataclass
+class RenderExtras:
+    """Editor effects applied in the render pass (all optional)."""
+
+    video_post: list[str] = field(default_factory=list)  # e.g. the /3d camera filter
+    cards: list[ImageCard] = field(default_factory=list)
+    music: MusicBed | None = None
+    chroma: dict | None = None  # {"key": "0x00FF00", "similarity": .., "blend": ..}
+    background: Background | None = None
+    behind_ass: str | None = None  # /texto-atras text layer (file name in the work dir)
+    matte_input: int = -1  # composite pass: input index of the person matte
+
+    def inputs(self, start: int, fps: Fraction, duration: float) -> list[str]:
+        """ffmpeg input arguments for the extra media, assigning their input indices."""
+        args: list[str] = []
+        i = start
+        for c in self.cards:
+            c.input = i
+            args += [
+                "-loop",
+                "1",
+                "-framerate",
+                f"{fps.numerator}/{fps.denominator}",
+                "-t",
+                f"{c.t1 + 0.1:.3f}",
+                "-i",
+                str(c.path),
+            ]
+            i += 1
+        if self.background is not None and self.background.kind == "image" and self.background.image:
+            self.background.input = i
+            args += [
+                "-loop",
+                "1",
+                "-framerate",
+                f"{fps.numerator}/{fps.denominator}",
+                "-t",
+                f"{duration + 0.5:.3f}",
+                "-i",
+                str(self.background.image),
+            ]
+            i += 1
+        if self.music is not None:
+            self.music.input = i
+            args += ["-stream_loop", "-1", "-i", str(self.music.path)]
+            i += 1
+        return args
+
+
+def _background(
+    bg: Background, src: str, dst: str, ow: int, oh: int, fps: Fraction, duration: float
+) -> list[str]:
+    if bg.kind == "color":
+        c = bg.color.lstrip("#")
+        return [
+            f"[{src}]nullsink",
+            f"color=c=0x{c}:s={ow}x{oh}:r={fps.numerator}/{fps.denominator}:d={duration + 0.5:.3f},format=yuv420p[{dst}]",
+        ]
+    if bg.kind == "image" and bg.input >= 0:
+        return [
+            f"[{src}]nullsink",
+            f"[{bg.input}:v]scale={ow}:{oh}:force_original_aspect_ratio=increase,crop={ow}:{oh},setsar=1,format=yuv420p[{dst}]",
+        ]
+    bw, bh = max(2, ow // 6 // 2 * 2), max(2, oh // 6 // 2 * 2)
+    return [
+        f"[{src}]scale={bw}:{bh}:flags=fast_bilinear,gblur=sigma=8,eq=brightness=-0.08,scale={ow}:{oh}:flags=bilinear,setsar=1[{dst}]"
+    ]
+
+
+def post_parts(
+    last: str, ex: RenderExtras, ow: int, oh: int, fps: Fraction, duration: float, matte: str | None = None
+) -> tuple[list[str], str]:
+    """Editor effects on the assembled picture, before captions. Returns (filters, last label)."""
+    parts: list[str] = []
+    cur = last
+    if matte is not None:  # AI matte composite: background treatment and text *behind* the person
+        parts.append(f"[{cur}]format=yuv420p,split[pfg][pbg]")
+        bg = "pbg"
+        if ex.background is not None:
+            parts += _background(ex.background, "pbg", "pbg2", ow, oh, fps, duration)
+            bg = "pbg2"
+        if ex.behind_ass:
+            parts.append(f"[{bg}]ass=filename={ex.behind_ass}:fontsdir=fonts[pbgt]")
+            bg = "pbgt"
+        parts.append(f"[pfg][{matte}]alphamerge[pperson]")
+        parts.append(f"[{bg}][pperson]overlay=format=auto,format=yuv420p[pcomp]")
+        cur = "pcomp"
+    elif ex.chroma is not None:  # green / blue screen
+        k = ex.chroma
+        parts.append(f"[{cur}]split[kfg][kbg]")
+        parts += _background(ex.background or Background(), "kbg", "kbg2", ow, oh, fps, duration)
+        parts.append(
+            f"[kfg]chromakey={k['key']}:{k.get('similarity', 0.13)}:{k.get('blend', 0.06)},despill=type={'green' if k.get('green', True) else 'blue'}[kcut]"
+        )
+        parts.append("[kbg2][kcut]overlay=format=auto,format=yuv420p[kcomp]")
+        cur = "kcomp"
+    if ex.video_post:
+        parts.append(f"[{cur}]{','.join(ex.video_post)}[vpost]")
+        cur = "vpost"
+    for i, c in enumerate(ex.cards):
+        cw, ch = int(ow * 0.82) // 2 * 2, int(oh * (0.42 if oh > ow else 0.6)) // 2 * 2
+        y = f"H*{0.16 if oh > ow else 0.12}"
+        d = c.t1 - c.t0
+        parts.append(
+            f"[{c.input}:v]scale={cw}:{ch}:force_original_aspect_ratio=decrease,pad=iw+12:ih+12:6:6:white,format=yuva420p,"
+            f"fade=t=in:st=0:d=0.25:alpha=1,fade=t=out:st={max(0.0, d - 0.3):.3f}:d=0.3:alpha=1,setpts=PTS-STARTPTS+{c.t0:.3f}/TB[card{i}]"
+        )
+        parts.append(
+            f"[{cur}][card{i}]overlay=x=(W-w)/2:y={y}:enable='between(t,{c.t0:.3f},{c.t1:.3f})':eof_action=pass[vcard{i}]"
+        )
+        cur = f"vcard{i}"
+    return parts, cur
+
+
+def music_parts(voice: str, m: MusicBed, duration: float) -> list[str]:
+    """Music under the voice: fade in/out, optional sidechain ducking, peak-limited mix."""
+    fade_out = max(0.0, duration - 1.5)
+    parts = [
+        f"[{m.input}:a]atrim=start={m.offset:.3f},asetpts=PTS-STARTPTS,aresample={AUDIO_RATE},aformat=channel_layouts=stereo,"
+        f"volume={m.volume_db:.1f}dB,afade=t=in:st=0:d=0.6,afade=t=out:st={fade_out:.3f}:d=1.5[mus]"
+    ]
+    if m.duck:
+        parts.append(f"[{voice}]asplit[mvo][msc]")
+        parts.append("[mus][msc]sidechaincompress=threshold=0.02:ratio=6:attack=30:release=450[mduck]")
+        parts.append(
+            "[mvo][mduck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.9:level=disabled[aout]"
+        )
+    else:
+        parts.append(
+            f"[{voice}][mus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.9:level=disabled[aout]"
+        )
+    return parts
+
+
+def output_size(media: MediaInfo, aspect: str = "9:16") -> tuple[int, int]:
+    """1080x1920 (or 1920x1080 for 16:9) when the source can sustain it, otherwise 720p
+    (no fake upscaling to 'HD')."""
+    hd = min(media.width, media.height) >= 700
+    if aspect == "16:9":
+        return (1920, 1080) if hd else (1280, 720)
+    return (1080, 1920) if hd else (720, 1280)
 
 
 def output_fps(media: MediaInfo) -> Fraction:
@@ -95,7 +264,7 @@ def assign_zooms(segments: list[Segment], fps: Fraction, zooms: list) -> list:
     for seg in segments:
         d = (seg.f1 - seg.f0) / f
         seg.out_start, seg.zooms = cursor, []
-        if seg.layout["type"] == "crop":
+        if seg.layout["type"] == "crop" or seg.layout.get("full"):
             for z in zooms:
                 if z.t0 >= cursor + 0.05 and z.t1 <= cursor + d - 0.05:
                     seg.zooms.append((z.t0, z.t1, z.amp, z.ramp))
@@ -124,7 +293,7 @@ def add_punch_transitions(
     for i in jump_cuts(segments):
         seg = segments[i]
         d = (seg.f1 - seg.f0) / f
-        if seg.layout.get("type") != "crop" or d < ramp + hold + 0.4:
+        if (seg.layout.get("type") != "crop" and not seg.layout.get("full")) or d < ramp + hold + 0.4:
             continue
         t0 = seg.out_start
         if t0 - last < min_spacing or any(z[0] < t0 + ramp + hold + 0.3 for z in seg.zooms):
@@ -195,6 +364,13 @@ def _layout_chain(
             f"[{tag}ti]crop={t['w']}:{t['h']}:{t['x']}:{t['y']},scale={ow}:{half}:flags=lanczos[{tag}tp];"
             f"[{tag}bi]crop={b['w']}:{b['h']}:{b['x']}:{b['y']},scale={ow}:{oh - half}:flags=lanczos[{tag}bp];"
             f"[{tag}tp][{tag}bp]vstack,drawbox=x=0:y={half - 2}:w={ow}:h=4:color=black:t=fill,setsar=1[{dst}]"
+        )
+    if kind == "fit" and layout.get("full") and zooms:
+        # same-aspect source kept whole: punch-ins scale it up and keep the centre (one resample)
+        z = zoom_expression(zooms, out_start)
+        return (
+            f"[{src}]scale=w='trunc({ow}*({z})/2)*2':h='trunc({oh}*({z})/2)*2':eval=frame:flags=lanczos,"
+            f"crop={ow}:{oh}:'(iw-{ow})/2':'(ih-{oh})/2',setsar=1[{dst}]"
         )
     if kind == "fit":
         return (
@@ -299,7 +475,13 @@ def _loudnorm(polish: AudioPolish | None, measuring: bool) -> str:
 
 
 def video_parts(
-    segments: list[Segment], media: MediaInfo, fps: Fraction, ow: int, oh: int, ass_name: str | None
+    segments: list[Segment],
+    media: MediaInfo,
+    fps: Fraction,
+    ow: int,
+    oh: int,
+    ass_name: str | None,
+    extras: RenderExtras | None = None,
 ) -> list[str]:
     f = float(fps)
     n = len(segments)
@@ -326,6 +508,10 @@ def video_parts(
     if n > 1:
         parts.append("".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[vcat]")
         last = "vcat"
+    if extras is not None:
+        dur = sum(seg.f1 - seg.f0 for seg in segments) / f
+        post, last = post_parts(last, extras, ow, oh, fps, dur)
+        parts += post
     tail = f"ass=filename={ass_name}:fontsdir=fonts," if ass_name else ""
     parts.append(f"[{last}]{tail}format=yuv420p[vout]")
     return parts
@@ -380,11 +566,13 @@ def build_filtergraph(
     ass_name: str | None,
     normalize_audio: bool,
     polish: AudioPolish | None = None,
+    extras: RenderExtras | None = None,
 ) -> str:
-    return ";".join(
-        video_parts(segments, media, fps, ow, oh, ass_name)
-        + audio_parts(segments, media, fps, normalize_audio, polish)
-    )
+    audio = audio_parts(segments, media, fps, normalize_audio, polish)
+    if extras is not None and extras.music is not None:
+        audio[-1] = audio[-1].rsplit("[aout]", 1)[0] + "[voice]"
+        audio += music_parts("voice", extras.music, sum(s.f1 - s.f0 for s in segments) / float(fps))
+    return ";".join(video_parts(segments, media, fps, ow, oh, ass_name, extras) + audio)
 
 
 _JSON_BLOCK = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.S)
@@ -450,12 +638,18 @@ def render_clip(
     *,
     quality: str = "high",
     loudness_memo=None,  # noqa: ANN001 - orchestrator.ClipCache: reuses pass 1 when the audio graph is unchanged
+    aspect: str = "9:16",
+    extras: RenderExtras | None = None,
 ) -> dict:
-    """Render one clip. Returns the parameters used (for QA and logs)."""
+    """Render one clip. Returns the parameters used (for QA and logs).
+
+    ``quality="intermediate"`` writes a near-lossless fast encode used as the input of the AI
+    matte composite (only when /tela-verde AI or /texto-atras is on).
+    """
     s = get_settings()
     plan = active_plan()
     fps = output_fps(media)
-    ow, oh = output_size(media)
+    ow, oh = output_size(media, aspect)
     f = float(fps)
     total_frames = sum(seg.f1 - seg.f0 for seg in segments)
     out_duration = total_frames / f
@@ -490,21 +684,29 @@ def render_clip(
         if polish.measured:
             polish.report["measured_lufs"] = float(polish.measured["input_i"])
             polish.report["measured_true_peak_db"] = float(polish.measured["input_tp"])
-    graph = build_filtergraph(segments, media, fps, ow, oh, ass_name, s.normalize_audio, polish)
+    if extras is not None and (extras.behind_ass or extras.chroma is not None):
+        _link_fonts(workdir)
+    # extra media get their input indices first: the filter graph refers to them by index
+    extra_inputs = (
+        extras.inputs(2 if not media.has_audio else 1, fps, out_duration) if extras is not None else []
+    )
+    graph = build_filtergraph(segments, media, fps, ow, oh, ass_name, s.normalize_audio, polish, extras)
     # "max" export: lower CRF and a slower preset (measured trade-off in docs/PERFORMANCE.md)
-    crf = max(12, s.x264_crf - 2) if quality == "max" else s.x264_crf
-    preset = "slow" if quality == "max" else plan.x264_preset
+    crf = max(12, s.x264_crf - 2) if quality == "max" else 10 if quality == "intermediate" else s.x264_crf
+    preset = "slow" if quality == "max" else "ultrafast" if quality == "intermediate" else plan.x264_preset
+    rate = (16 if max(ow, oh) >= 1920 else 8) * (4 if quality == "intermediate" else 1)
     tmp_out = out_path.with_suffix(".tmp.mp4")
     args = [*input_args(Path(source).resolve(), family, seek=clip_start, duration=span)]
     if not media.has_audio:
         args += ["-f", "lavfi", "-t", f"{out_duration + 1:.3f}", "-i", f"anullsrc=r={AUDIO_RATE}:cl=stereo"]
+    args += extra_inputs
     args += [
         "-filter_complex", graph,
         "-map", "[vout]", "-map", "[aout]",
         "-filter_complex_threads", str(plan.threads),
         "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
         "-profile:v", "high", "-pix_fmt", "yuv420p",
-        "-maxrate", f"{16 if oh >= 1920 else 8}M", "-bufsize", f"{32 if oh >= 1920 else 16}M",  # cap spikes, keep CRF quality
+        "-maxrate", f"{rate}M", "-bufsize", f"{rate * 2}M",  # cap spikes, keep CRF quality
         *_color_tags(media),
         "-g", str(max(12, int(round(f * 2)))),
         "-c:a", "aac", "-b:a", s.audio_bitrate, "-ar", str(AUDIO_RATE), "-ac", "2",
@@ -575,3 +777,72 @@ def make_thumbnail(video: Path, out: Path, at: float = 0.5) -> None:
         str(out),
     ]
     run_ffmpeg(args, timeout=60)
+
+
+def composite_clip(
+    base: Path,
+    matte: Path,
+    out_path: Path,
+    media_fps: Fraction,
+    ow: int,
+    oh: int,
+    duration: float,
+    extras: RenderExtras,
+    ass_path: Path | None,
+    *,
+    quality: str = "high",
+    color_media: MediaInfo | None = None,
+    on_progress: ProgressFn | None = None,
+    should_cancel: CancelFn | None = None,
+) -> None:
+    """Second pass of the AI-matte editors: base clip + person matte -> final clip.
+
+    The base already carries the edit, framing and normalised audio; this pass only composites
+    (background, text behind the subject), then applies the remaining effects, captions and
+    music, and encodes once more at the export settings.
+    """
+    s = get_settings()
+    plan = active_plan()
+    workdir = out_path.parent
+    _link_fonts(workdir)
+    fps = media_fps
+    extra_inputs = extras.inputs(2, fps, duration)
+    parts = [f"[1:v]scale={ow}:{oh}:flags=bicubic,fps={fps.numerator}/{fps.denominator},format=gray[matte]"]
+    post, last = post_parts("0:v", extras, ow, oh, fps, duration, matte="matte")
+    parts += post
+    tail = f"ass=filename={ass_path.name}:fontsdir=fonts," if ass_path is not None else ""
+    parts.append(f"[{last}]{tail}format=yuv420p[vout]")
+    if extras.music is not None:
+        parts.append("[0:a]anull[voice]")
+        parts += music_parts("voice", extras.music, duration)
+    else:
+        parts.append("[0:a]anull[aout]")
+    args = ["-threads", str(plan.threads), "-i", base.name, "-threads", str(plan.threads), "-i", matte.name]
+    args += extra_inputs
+    crf = max(12, s.x264_crf - 2) if quality == "max" else s.x264_crf
+    preset = "slow" if quality == "max" else plan.x264_preset
+    rate = 16 if max(ow, oh) >= 1920 else 8
+    tmp_out = out_path.with_suffix(".tmp.mp4")
+    args += [
+        "-filter_complex", ";".join(parts), "-map", "[vout]", "-map", "[aout]",
+        "-filter_complex_threads", str(plan.threads),
+        "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-profile:v", "high", "-pix_fmt", "yuv420p",
+        "-maxrate", f"{rate}M", "-bufsize", f"{rate * 2}M",
+        *(_color_tags(color_media) if color_media is not None else []),
+        "-g", str(max(12, int(round(float(fps) * 2)))),
+        "-c:a", "aac", "-b:a", s.audio_bitrate, "-ar", str(AUDIO_RATE), "-ac", "2",
+        "-t", f"{duration:.6f}", "-map_metadata", "-1", "-movflags", "+faststart", "-f", "mp4",
+        "-threads", str(plan.threads), tmp_out.name,
+    ]  # fmt: skip
+    try:
+        run_ffmpeg(
+            args,
+            total_duration=duration,
+            on_progress=on_progress,
+            should_cancel=should_cancel,
+            cwd=workdir,
+            timeout=s.ffmpeg_timeout_s,
+        )
+        os.replace(tmp_out, out_path)
+    finally:
+        tmp_out.unlink(missing_ok=True)

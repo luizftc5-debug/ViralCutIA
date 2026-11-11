@@ -187,6 +187,12 @@ ACTIVE_PEAK = {"color": 1.10, "pop": 1.20, "box": 1.0, "reveal": 1.0}
 EMPHASIS_PEAK = 1.10  # keywords of kinetic styles are scaled up on top of the pop
 
 
+def scale_for(width: int, height: int) -> float:
+    """Caption scale: sizes are designed for a 1080x1920 frame. A landscape 16:9 frame gets
+    type ~0.7x of its height ratio (a TV-distance reading size), not phone-sized giant words."""
+    return height / 1920 if height >= width else height / 1080 * 0.62
+
+
 @lru_cache(maxsize=32)
 def _em_ratio(font_path: str) -> float:
     """em size in pixels per unit of ASS font size, as libass computes it.
@@ -411,7 +417,7 @@ def make_layout(
     spec = effective_spec(opts)
     name, path = resolve_font(opts, spec)
     safe = SAFE_AREAS.get(platform, SAFE_AREAS["universal"])
-    k = height / 1920
+    k = scale_for(width, height)
     size = spec.size * SIZE_SCALE[opts.size] * k
     max_width = width * (1 - 2 * safe["side"])
     block = size * spec.line_spacing * spec.max_lines
@@ -457,7 +463,7 @@ def blur_band_anchor(
     if shown_h >= out_h * 0.98:
         return None
     top_edge, bottom_edge = (out_h - shown_h) / 2, (out_h + shown_h) / 2
-    block = spec.size * SIZE_SCALE[size] * (out_h / 1920) * spec.line_spacing * spec.max_lines
+    block = spec.size * SIZE_SCALE[size] * scale_for(out_w, out_h) * spec.line_spacing * spec.max_lines
     margin = out_h * 0.015
     if position == "top":
         lo, hi = out_h * safe["top"], top_edge - margin
@@ -473,7 +479,7 @@ def layout_pages(pages: list[Page], lay: Layout) -> None:
     fp = str(lay.font_path)
     for p in pages:
         widths = [text_width(w.text, fp, lay.size) for w in p.words]
-        space = word_gap(fp, lay.size, lay.spec, lay.height / 1920)
+        space = word_gap(fp, lay.size, lay.spec, scale_for(lay.width, lay.height))
         groups = _split_lines(p.words, widths, space, lay.max_width, lay.spec)
         # Worst case on screen: one word of the line at its largest animated state. The active
         # word grows by a percentage of *its own* width, so a long word needs proportionally more
@@ -482,7 +488,7 @@ def layout_pages(pages: list[Page], lay: Layout) -> None:
             EMPHASIS_PEAK if (lay.spec.kinetic or lay.spec.keyword_scale) else 1.0
         )
         pad = lay.size * 0.40 if lay.spec.active == "box" else 0.0  # highlight block around the word
-        k = lay.height / 1920
+        k = scale_for(lay.width, lay.height)
         widest = max(
             sum(widths[i] for i in g) + space * (len(g) - 1) + (peak - 1.0) * max(widths[i] for i in g) + pad
             for g in groups
@@ -530,7 +536,7 @@ def build_ass(
     lay = make_layout(opts, platform, width, height, center_y)
     layout_pages(pages, lay)
     spec = lay.spec
-    k = height / 1920
+    k = scale_for(width, height)
     white, black, accent = spec.text, "#000000", lay.accent
     head = "\n".join(
         [

@@ -24,6 +24,7 @@ from ..db import Clip, ClipMetric, Job, JobLog, session_scope, utcnow
 from ..jobs import enqueue
 from ..options import SAFE_AREAS, CaptionOptions, JobOptions, VideoStyleKey
 from ..pipeline import captions as cap
+from ..pipeline.editors import EDITORS, PRESETS
 from ..pipeline.orchestrator import Artifacts, effective_words
 from ..pipeline.probe import MediaInfo, ProbeError, probe
 from ..pipeline.styles import STYLES as VIDEO_STYLES
@@ -123,6 +124,19 @@ def config() -> dict[str, Any]:
             }
             for k, v in VIDEO_STYLES.items()
         ],
+        # Creator Studio: the 13 editors and the content presets
+        "editors": EDITORS,
+        "presets": [
+            {
+                "key": k,
+                "label": v["label"],
+                "description": v["description"],
+                "options": v["options"],
+                "editors": v["editors"],
+            }
+            for k, v in PRESETS.items()
+        ],
+        "content_types": ["shorts", "tiktok", "reels", "youtube", "compilation"],
         "caption_fonts": [
             {"key": "auto", "label": "Style default"},
             {"key": "inter", "label": "Inter"},
@@ -251,7 +265,7 @@ def start(job_id: str, options: JobOptions) -> dict[str, Any]:
             raise HTTPException(409, "This job is already being processed.")
         for clip in list(job.clips):
             s.delete(clip)
-        job.options = options.model_dump()
+        job.options = options.model_dump(by_alias=True)
         job.attempts = 0
         job.analysis = {}
     import shutil
@@ -497,6 +511,7 @@ class ClipUpdate(BaseModel):
     style: VideoStyleKey | None = None
     intensity: Literal["subtle", "balanced", "high"] | None = None
     quality: Literal["high", "max"] | None = None
+    editors: dict[str, dict[str, Any]] | None = None  # per-clip Creator Studio overrides
     page_edits: list[PageEdit] | None = Field(default=None, max_length=500)
 
 
@@ -543,8 +558,9 @@ def update_clip(job_id: str, clip_id: str, body: ClipUpdate) -> dict[str, Any]:
         end = min(end, media_duration) if media_duration else end
         if end - start < 3.0:
             raise HTTPException(422, "A clip must be at least 3 seconds long.")
-        if end - start > 180.0:
-            raise HTTPException(422, "A clip can be at most 180 seconds long.")
+        longest = 3600.0 if (clip.edit or {}).get("aspect") == "16:9" else 180.0
+        if end - start > longest:
+            raise HTTPException(422, f"A clip can be at most {int(longest)} seconds long.")
         if (start, end) != (clip.start, clip.end):
             dims = dict(clip.dimensions or {})
             dims["stale"] = True  # the score describes the originally selected boundaries
@@ -557,10 +573,23 @@ def update_clip(job_id: str, clip_id: str, body: ClipUpdate) -> dict[str, Any]:
         if body.smart_trim is not None:
             clip.smart_trim = body.smart_trim
         edit = dict(clip.edit or {})
+        if edit.get("kind") == "compilation":
+            raise HTTPException(409, "A compilation is rebuilt from its clips; edit those instead.")
         for key in ("style", "intensity", "quality"):
             value = getattr(body, key)
             if value is not None:
                 edit[key] = value
+        if body.editors is not None:
+            from ..pipeline.editors import EditorsConfig
+
+            merged = {**(edit.get("editors") or {})}
+            for key, cfg in body.editors.items():
+                merged[key] = {**merged.get(key, {}), **cfg}
+            try:
+                EditorsConfig.model_validate(merged)
+            except ValueError as exc:
+                raise HTTPException(422, "Some editor settings are not valid.") from exc
+            edit["editors"] = merged
         clip.edit = edit
         clip.status = "queued"
         clip.progress = 0.0
@@ -726,3 +755,117 @@ def list_metrics(job_id: str, clip_id: str) -> dict[str, Any]:
 
 def error_response(status: int, message: str) -> JSONResponse:
     return JSONResponse({"detail": message}, status_code=status)
+
+
+# ----------------------------------------------------------------------------- Creator Studio
+
+
+_ASSET_LIMIT_MB = {"music": 60, "image": 20, "reference": 600}
+_IMAGE_MAGIC = (b"\x89PNG", b"\xff\xd8\xff", b"RIFF")
+
+
+@router.get("/jobs")
+def list_jobs(limit: int = 50) -> dict[str, Any]:
+    """Project history: recent videos, newest first (single-user, local-first)."""
+    limit = max(1, min(200, limit))
+    with session_scope() as s:
+        jobs = s.execute(select(Job).order_by(Job.created_at.desc()).limit(limit)).scalars().all()
+        out = []
+        for j in jobs:
+            if j.status == "uploading":
+                continue
+            item = job_out(j, include_clips=False)
+            ready = [c for c in j.clips if c.status == "ready"]
+            item["clip_count"] = len(ready)
+            item["thumbnail"] = (
+                f"/api/jobs/{j.id}/clips/{ready[0].id}/thumbnail?v={ready[0].version}" if ready else None
+            )
+            out.append(item)
+        return {"jobs": out}
+
+
+@router.post("/jobs/{job_id}/assets", status_code=201)
+async def upload_asset(request: Request, job_id: str, kind: str, filename: str = "asset") -> dict[str, Any]:
+    """User media for the editors: music (/trilha), images (/prova, /tela-verde), a reference video."""
+    from ..db import new_id
+    from ..pipeline.studio import ASSET_KINDS, assets_dir, list_assets, save_asset_index
+
+    if kind not in ASSET_KINDS:
+        raise HTTPException(422, "Unknown asset kind.")
+    storage = get_storage()
+    with session_scope() as s:
+        _get_job(s, job_id)
+    job_dir = storage.job_dir(job_id)
+    limit = _ASSET_LIMIT_MB[kind] * 1024 * 1024
+    name = sanitize_filename(filename, "asset")
+    ext = Path(name).suffix.lower()
+    allowed = {
+        "music": {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"},
+        "image": {".png", ".jpg", ".jpeg", ".webp"},
+    }
+    if kind != "reference" and ext not in allowed[kind]:
+        raise HTTPException(422, f"Unsupported {kind} format.")
+    asset_id = new_id()
+    tmp = assets_dir(job_dir) / f"{asset_id}.part"
+    size, head = 0, b""
+    try:
+        with tmp.open("wb") as fh:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(413, f"The file is larger than the {_ASSET_LIMIT_MB[kind]} MB limit.")
+                if len(head) < 64:
+                    head += chunk[:64]
+                fh.write(chunk)
+        if size == 0:
+            raise HTTPException(422, "The upload was empty.")
+        meta: dict[str, Any] = {"kind": kind, "name": name, "size": size}
+        if kind == "image":
+            if not head.startswith(_IMAGE_MAGIC):
+                raise HTTPException(422, "This is not a PNG, JPEG or WebP image.")
+            from PIL import Image
+
+            with Image.open(tmp) as im:
+                im.verify()
+                meta["width"], meta["height"] = im.size
+        elif kind == "music":
+            from ..pipeline.ffmpeg import run_capture
+
+            res = run_capture(["ffprobe", "-v", "error", "-protocol_whitelist", "file", "-select_streams", "a:0",
+                               "-show_entries", "format=duration", "-of", "csv=p=0", str(tmp)], timeout=30)  # fmt: skip
+            try:
+                meta["duration"] = round(float(res.stdout.decode().strip().splitlines()[0]), 2)
+            except (ValueError, IndexError):
+                raise HTTPException(422, "This audio file could not be read.") from None
+        else:
+            ext, family = validate_extension_and_magic(name, head[:64], get_settings().allowed_extensions)
+            media = probe(tmp, family)
+            meta["duration"] = media.duration
+        final = tmp.with_name(f"{asset_id}{ext}")
+        tmp.replace(final)
+        meta["file"] = final.name
+    except UploadRejected as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except ProbeError as exc:
+        raise HTTPException(422, f"The reference video could not be read: {exc}") from exc
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception("asset upload failed")
+        raise HTTPException(422, "The file could not be read.") from None
+    finally:
+        tmp.unlink(missing_ok=True)
+    index = list_assets(job_dir)
+    index[asset_id] = meta
+    save_asset_index(job_dir, index)
+    return {"id": asset_id, **{k: v for k, v in meta.items() if k != "file"}}
+
+
+@router.get("/jobs/{job_id}/assets")
+def get_assets(job_id: str) -> dict[str, Any]:
+    from ..pipeline.studio import list_assets
+
+    with session_scope() as s:
+        _get_job(s, job_id)
+    idx = list_assets(get_storage().job_dir(job_id))
+    return {"assets": [{"id": k, **{f: v for f, v in m.items() if f != "file"}} for k, m in idx.items()]}
