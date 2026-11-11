@@ -26,6 +26,7 @@ from ..options import SAFE_AREAS, CaptionOptions, JobOptions
 from ..pipeline import captions as cap
 from ..pipeline.orchestrator import Artifacts, effective_words
 from ..pipeline.probe import MediaInfo, ProbeError, probe
+from ..pipeline.transcribe import plan_asr
 from ..security import UploadRejected, is_valid_id, safe_stem, sanitize_filename, validate_extension_and_magic
 from ..storage import get_storage
 from .serializers import clip_out, job_out
@@ -108,7 +109,9 @@ def config() -> dict[str, Any]:
         ],
         "platforms": list(SAFE_AREAS),
         "engine": {
-            "transcription": f"faster-whisper:{s.whisper_model}",
+            "transcription": f"faster-whisper:{plan_asr().model}",
+            "transcription_mode": plan_asr().mode,
+            "forced_alignment": s.align_mode != "off",
             "narrative_analysis": f"llm:{s.llm_model}" if s.llm_active else "heuristic",
             "llm_enabled": s.llm_active,
             "min_score": s.min_score,
@@ -204,7 +207,7 @@ def _discard(job_id: str) -> None:
 def start(job_id: str, options: JobOptions) -> dict[str, Any]:
     with session_scope() as s:
         job = _get_job(s, job_id)
-        if job.status not in ("uploaded", "failed", "canceled", "completed"):
+        if job.status not in ("uploaded", "failed", "canceled", "completed", "review"):
             raise HTTPException(409, "This job is already being processed.")
         for clip in list(job.clips):
             s.delete(clip)
@@ -257,7 +260,7 @@ def get_logs(job_id: str, after: int = 0) -> dict[str, Any]:
 def cancel(job_id: str) -> dict[str, Any]:
     with session_scope() as s:
         job = _get_job(s, job_id)
-        if job.status == "queued":
+        if job.status in ("queued", "review"):
             job.status = "canceled"
             job.finished_at = utcnow()
         elif job.status == "processing":
@@ -274,6 +277,121 @@ def delete_job(job_id: str) -> Response:
         s.delete(job)
     get_storage().delete_job(job_id)
     return Response(status_code=204)
+
+
+# ----------------------------------------------------------------------------- transcript review
+
+
+class WordEdit(BaseModel):
+    index: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=80)
+
+
+class ReplaceRule(BaseModel):
+    find: str = Field(min_length=1, max_length=120)
+    replace: str = Field(max_length=120)
+    case_sensitive: bool = False
+
+
+class TranscriptUpdate(BaseModel):
+    words: list[WordEdit] = Field(default_factory=list, max_length=5000)
+    replace: list[ReplaceRule] = Field(default_factory=list, max_length=50)
+
+
+def _transcript_path(job_id: str) -> Path:
+    return get_storage().analysis_dir(job_id) / "transcript.json"
+
+
+@router.get("/jobs/{job_id}/transcript")
+def get_transcript(job_id: str) -> dict[str, Any]:
+    """The full recognised transcript with word timings, plus what the recogniser discarded."""
+    with session_scope() as s:
+        job = _get_job(s, job_id)
+        if job.status not in ("review", "completed"):
+            raise HTTPException(409, "The transcript is available once the video has been analysed.")
+    path = _transcript_path(job_id)
+    if not path.exists():
+        raise HTTPException(404, "No transcript for this video.")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    original = path.with_name("transcript.original.json")
+    return {
+        "language": data.get("language", ""),
+        "engine": data.get("engine", ""),
+        "words": [
+            {
+                "index": i,
+                "text": w["text"],
+                "start": w["start"],
+                "end": w["end"],
+                "confidence": w.get("prob", 1.0),
+            }
+            for i, w in enumerate(data.get("words", []))
+        ],
+        "quality": data.get("quality", {}),
+        "edited": original.exists(),
+    }
+
+
+@router.put("/jobs/{job_id}/transcript")
+def update_transcript(job_id: str, body: TranscriptUpdate) -> dict[str, Any]:
+    """Correct words of the whole transcript (by index or find-and-replace).
+
+    Only the text changes; every word keeps the time it was spoken at. Before rendering the
+    corrections simply apply to the upcoming clips; on a finished job the clips that contain
+    corrected words are queued for re-rendering.
+    """
+    from ..pipeline.transcribe import Transcript
+    from ..pipeline.transcript_edit import Replacement, apply_replacements, apply_word_edits
+
+    with session_scope() as s:
+        job = _get_job(s, job_id)
+        if job.status not in ("review", "completed"):
+            raise HTTPException(409, "The transcript can be corrected once the video has been analysed.")
+    path = _transcript_path(job_id)
+    if not path.exists():
+        raise HTTPException(404, "No transcript for this video.")
+    transcript = Transcript.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    words = transcript.words
+    words, by_index = apply_word_edits(words, {e.index: e.text for e in body.words})
+    words, by_rule = apply_replacements(
+        words, [Replacement(r.find, r.replace, r.case_sensitive) for r in body.replace]
+    )
+    if not by_index and not by_rule and len(words) == len(transcript.words):
+        return {"changed": 0, "affected_clips": [], "words": len(words)}
+    original = path.with_name("transcript.original.json")
+    if not original.exists():  # keep what the recogniser actually produced
+        original.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    changed_times = [(words[i].start, words[i].end) for i in by_index if i < len(words)]
+    changed_times += [(words[i].start, words[i].end) for i in by_rule if i < len(words)]
+    transcript.words = words
+    path.write_text(json.dumps(transcript.to_dict(), ensure_ascii=False), encoding="utf-8")
+
+    affected: list[str] = []
+    with session_scope() as s:
+        job = _get_job(s, job_id)
+        for clip in job.clips:
+            hit = any(a < clip.end and b > clip.start for a, b in changed_times)
+            if not hit:
+                continue
+            affected.append(clip.id)
+            if job.status == "completed" and clip.status == "ready":
+                clip.text_edits = {}  # a global correction supersedes older per-clip text, which was keyed to the old words
+                clip.status, clip.progress, clip.error, clip.updated_at = "queued", 0.0, "", utcnow()
+    return {"changed": len(set(by_index) | set(by_rule)), "affected_clips": affected, "words": len(words)}
+
+
+@router.post("/jobs/{job_id}/resume")
+def resume_job(job_id: str) -> dict[str, Any]:
+    """Continue a job that was paused for transcript review."""
+    with session_scope() as s:
+        job = _get_job(s, job_id)
+        if job.status != "review":
+            raise HTTPException(409, "This job is not waiting for a transcript review.")
+        job.status = "queued"
+        job.queued_at = utcnow()
+        job.cancel_requested = False
+        job.analysis = {**(job.analysis or {}), "review": "resume"}
+        return job_out(job)
 
 
 # ----------------------------------------------------------------------------- clips

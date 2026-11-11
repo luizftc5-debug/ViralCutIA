@@ -20,7 +20,7 @@ QUESTION_BEAT = 0.9
 
 
 def _longest_silent_run(audio: AudioSignals, t0: float, t1: float) -> tuple[float, float] | None:
-    a, b = int(np.ceil(t0 / audio.hop)), int(np.floor(t1 / audio.hop))
+    a, b = int(np.ceil(t0 / audio.hop - 1e-6)), int(np.floor(t1 / audio.hop + 1e-6))
     if b - a < 2:
         return None
     seg = audio.rms_db[a:b] < audio.silence_threshold_db

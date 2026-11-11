@@ -21,6 +21,12 @@ from .transcribe import Word
 
 _TERMINAL = (".", "?", "!", "…")
 
+# Caption timing (seconds). A caption must never outlive the speech it shows.
+PAUSE_BREAK = 0.45  # a pause this long starts a new page
+HOLD_AFTER = 0.18  # a page stays this long after its last word ends
+JOIN_GAP = 0.30  # pages separated by less than this are chained without a gap
+MIN_PAGE = 0.35  # shortest time a page stays on screen
+
 
 @dataclass(frozen=True)
 class StyleSpec:
@@ -40,18 +46,27 @@ class StyleSpec:
     active: str  # color | reveal | box | pop
     line_spacing: float = 1.16
     strip_punct: bool = True
+    kinetic: bool = False  # page slides in; keywords scale up and keep their own colour
+    accent2: str = ""  # keyword colour for kinetic styles (#RRGGBB)
 
 
 STYLES: dict[str, StyleSpec] = {
+    "viral_dynamic": StyleSpec(
+        label="Viral Dynamic",
+        description="Bold, clean captions: the spoken word lights up, keywords stand out, phrases slide in.",
+        font="inter", weight="heavy", size=104, upper=True, max_words=4, max_lines=2, max_chars=15,
+        outline=7, shadow=3, blur=0.5, accent="#FFE600", active="color", line_spacing=1.0,
+        kinetic=True, accent2="#FF4D6D",
+    ),
     "high_retention": StyleSpec(
-        label="High Retention",
-        description="Bold word-by-word captions with a controlled colour highlight on the spoken word.",
+        label="Creator High Retention",
+        description="Short word-by-word phrases; a controlled colour highlight follows the voice.",
         font="poppins", weight="heavy", size=118, upper=True, max_words=3, max_lines=2, max_chars=13,
         outline=8, shadow=3, blur=0.6, accent="#FFD60A", active="color", line_spacing=0.96,
     ),
     "clean_editorial": StyleSpec(
-        label="Clean Editorial",
-        description="Quiet, elegant lines that reveal as they are spoken.",
+        label="Premium Minimal",
+        description="Quiet, elegant lines that reveal as they are spoken. Restrained movement.",
         font="inter", weight="medium", size=72, upper=False, max_words=7, max_lines=2, max_chars=24,
         outline=1.6, shadow=1.5, blur=2.2, accent="#F2C879", active="reveal", line_spacing=1.06, strip_punct=False,
     ),
@@ -63,7 +78,7 @@ STYLES: dict[str, StyleSpec] = {
     ),
     "gaming": StyleSpec(
         label="Gaming / Entertainment",
-        description="Oversized, high-contrast words that punch in with the commentary.",
+        description="High-contrast words that punch in with the commentary, placed clear of the gameplay.",
         font="anton", weight="heavy", size=168, upper=True, max_words=2, max_lines=1, max_chars=14,
         outline=10, shadow=5, blur=0.4, accent="#3DFF8F", active="pop",
     ),
@@ -86,6 +101,9 @@ FONTS: dict[str, dict[str, tuple[str, str]]] = {
 }
 
 SIZE_SCALE = {"s": 0.82, "m": 1.0, "l": 1.18}
+# Largest scale an active word reaches during its animation (see build_ass), per highlight mode.
+ACTIVE_PEAK = {"color": 1.10, "pop": 1.20, "box": 1.0, "reveal": 1.0}
+EMPHASIS_PEAK = 1.10  # keywords of kinetic styles are scaled up on top of the pop
 
 
 @lru_cache(maxsize=32)
@@ -218,7 +236,7 @@ def paginate(
             chars = sum(len(x.text) for x in cur) + len(cur) - 1
             brk = (
                 len(cur) >= spec.max_words
-                or it.start - prev.end > 0.6
+                or it.start - prev.end > PAUSE_BREAK
                 or prev.raw.rstrip("\"')").endswith(_TERMINAL)
                 or chars + 1 + len(it.text) > budget
                 or (prev.raw.endswith((",", ";", ":")) and len(cur) >= max(2, spec.max_words - 1))
@@ -254,13 +272,18 @@ def paginate(
                 w.emph = False
             seen = seen or w.emph
         start = g[0].start
+        last_end = g[-1].end
         nxt = merged[i + 1][0].start if i + 1 < len(merged) else None
-        end = g[-1].end + 0.6
+        if nxt is not None and nxt - last_end < JOIN_GAP:
+            end = nxt  # continuous speech: the next page replaces this one without a flicker
+        else:
+            end = last_end + HOLD_AFTER  # speech stopped: the caption goes with it
+            if nxt is not None:
+                end = min(end, nxt)
+        end = max(end, start + MIN_PAGE)  # long enough to be read
         if nxt is not None:
-            end = nxt if nxt - g[-1].end < 0.9 else min(end, nxt)
+            end = min(end, nxt)
         end = min(end, clip_duration)
-        if end - start < 0.2:
-            end = min(clip_duration, start + 0.2)
         pages.append(Page(start=start, end=max(end, start + 0.05), words=g))
     return pages
 
@@ -296,9 +319,12 @@ class Layout:
     accent: str
     center_y: float
     max_width: float
+    accent2: str = ""
 
 
-def make_layout(opts: CaptionOptions, platform: str, width: int, height: int) -> Layout:
+def make_layout(
+    opts: CaptionOptions, platform: str, width: int, height: int, center_y: float | None = None
+) -> Layout:
     spec = STYLES[opts.style]
     name, path = resolve_font(opts, spec)
     safe = SAFE_AREAS.get(platform, SAFE_AREAS["universal"])
@@ -312,7 +338,39 @@ def make_layout(opts: CaptionOptions, platform: str, width: int, height: int) ->
         cy = height * 0.52
     else:
         cy = height * (1 - safe["bottom"] - 0.03) - block / 2
-    return Layout(width, height, name, path, size, spec, opts.color or spec.accent, cy, max_width)
+    if center_y is not None:
+        cy = center_y
+    return Layout(
+        width, height, name, path, size, spec, opts.color or spec.accent, cy, max_width, spec.accent2
+    )
+
+
+def blur_band_anchor(
+    position: str, platform: str, media_w: int, media_h: int, out_w: int, out_h: int, style: str, size: str
+) -> float | None:
+    """Vertical centre for captions inside the blurred band of a letterboxed (``blur``) layout.
+
+    A landscape frame shown whole leaves a band above and below it. Captions placed there
+    never cover the picture, which is what gameplay and screen recordings need. Returns ``None``
+    when the band is too small (the default, safe-area based placement is used instead).
+    """
+    if position == "middle" or media_w <= 0:
+        return None
+    spec = STYLES[style]
+    safe = SAFE_AREAS.get(platform, SAFE_AREAS["universal"])
+    shown_h = out_w * media_h / media_w
+    if shown_h >= out_h * 0.98:
+        return None
+    top_edge, bottom_edge = (out_h - shown_h) / 2, (out_h + shown_h) / 2
+    block = spec.size * SIZE_SCALE[size] * (out_h / 1920) * spec.line_spacing * spec.max_lines
+    margin = out_h * 0.015
+    if position == "top":
+        lo, hi = out_h * safe["top"], top_edge - margin
+    else:
+        lo, hi = bottom_edge + margin, out_h * (1 - safe["bottom"])
+    if hi - lo < block * 1.05:
+        return None
+    return (lo + hi) / 2
 
 
 def layout_pages(pages: list[Page], lay: Layout) -> None:
@@ -322,8 +380,17 @@ def layout_pages(pages: list[Page], lay: Layout) -> None:
         widths = [text_width(w.text, fp, lay.size) for w in p.words]
         space = word_gap(fp, lay.size, lay.spec, lay.height / 1920)
         groups = _split_lines(p.words, widths, space, lay.max_width, lay.spec)
-        widest = max(sum(widths[i] for i in g) + space * (len(g) - 1) for g in groups)
-        margin = lay.spec.outline * 2 + lay.size * 0.12  # outline, active-word scale-up
+        # Worst case on screen: one word of the line at its largest animated state. The active
+        # word grows by a percentage of *its own* width, so a long word needs proportionally more
+        # room than a fixed margin provides (measured by rasterising the layout).
+        peak = ACTIVE_PEAK[lay.spec.active] * (EMPHASIS_PEAK if lay.spec.kinetic else 1.0)
+        pad = lay.size * 0.40 if lay.spec.active == "box" else 0.0  # highlight block around the word
+        k = lay.height / 1920
+        widest = max(
+            sum(widths[i] for i in g) + space * (len(g) - 1) + (peak - 1.0) * max(widths[i] for i in g) + pad
+            for g in groups
+        )
+        margin = lay.spec.outline * k * 2 + lay.size * 0.04  # outline and blur halo
         p.scale = min(1.0, (lay.max_width - margin) / widest) if widest > 0 else 1.0
         p.lines = [[p.words[i] for i in g] for g in groups]
 
@@ -355,8 +422,15 @@ def _rounded_rect(w: float, h: float, r: float) -> str:
     return pts
 
 
-def build_ass(pages: list[Page], opts: CaptionOptions, platform: str, width: int, height: int) -> str:
-    lay = make_layout(opts, platform, width, height)
+def build_ass(
+    pages: list[Page],
+    opts: CaptionOptions,
+    platform: str,
+    width: int,
+    height: int,
+    center_y: float | None = None,
+) -> str:
+    lay = make_layout(opts, platform, width, height, center_y)
     layout_pages(pages, lay)
     spec = lay.spec
     k = height / 1920
@@ -408,10 +482,19 @@ def build_ass(pages: list[Page], opts: CaptionOptions, platform: str, width: int
                 t_on = max(p.start, w.start) if wi > 0 else p.start
                 t_off = flat[wi + 1].start if wi + 1 < len(flat) else p.end
                 t_off = min(max(t_off, t_on + 0.04), p.end)
-                base = f"\\an5\\pos({cx:.0f},{cy:.0f})\\fs{size:.1f}\\blur{spec.blur}"
-                fade_in = "\\fad(70,0)" if anim else ""
+                kin = spec.kinetic and anim
+                accent2 = lay.accent2 if spec.kinetic else accent
+                pos = f"\\pos({cx:.0f},{cy:.0f})"
                 # the box style already carries the accent; coloured text next to it would fight for attention
-                after_col = accent if (w.emph and spec.active != "box") else white
+                key_col = accent2 if spec.kinetic else accent
+                after_col = key_col if (w.emph and spec.active != "box") else white
+                hot = accent2 if (spec.kinetic and w.emph) else accent
+                emph_up = 1.10 if (spec.kinetic and w.emph) else 1.0
+                base_fs = f"\\fs{size:.1f}\\blur{spec.blur}"
+                base = f"\\an5{pos}{base_fs}"
+                # kinetic pages slide up into place while they fade in; later events hold the final position
+                enter = f"\\an5\\move({cx:.0f},{cy + size * 0.16:.0f},{cx:.0f},{cy:.0f},0,110){base_fs}"
+                fade_in = "\\fad(80,0)" if anim else ""
 
                 if spec.active == "reveal":
                     dim, full = "\\1a&H99&\\3a&HB0&\\4a&HD0&", "\\1a&H00&\\3a&H50&\\4a&H90&"
@@ -428,14 +511,16 @@ def build_ass(pages: list[Page], opts: CaptionOptions, platform: str, width: int
                     continue
 
                 # states: upcoming -> active -> spoken
-                ev(1, p.start, t_on, f"{{{base}{fade_in}}}{w.text}")
+                ev(1, p.start, t_on, f"{{{enter if kin else base}{fade_in}}}{w.text}")
                 if spec.active == "color":
+                    peak = 110 * emph_up
                     pop = (
-                        "\\fscx100\\fscy100\\t(0,70,\\fscx110\\fscy110)\\t(70,170,\\fscx104\\fscy104)"
+                        f"\\fscx100\\fscy100\\t(0,70,\\fscx{peak:.0f}\\fscy{peak:.0f})\\t(70,170,\\fscx{104 * emph_up:.0f}\\fscy{104 * emph_up:.0f})"
                         if anim
-                        else "\\fscx104\\fscy104"
+                        else f"\\fscx{104 * emph_up:.0f}\\fscy{104 * emph_up:.0f}"
                     )
-                    ev(2, t_on, t_off, f"{{{base}\\1c{_c(accent)}{pop}}}{w.text}")
+                    active_base = enter if (kin and t_on <= p.start + 1e-6) else base
+                    ev(2, t_on, t_off, f"{{{active_base}\\1c{_c(hot)}{pop}}}{w.text}")
                 elif spec.active == "pop":
                     tilt = 2.5 if wi % 2 == 0 else -2.5
                     pop = (

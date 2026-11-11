@@ -7,7 +7,7 @@ import { useState } from "react";
 import { CaptionControls } from "@/components/caption-controls";
 import { SiteHeader } from "@/components/site-header";
 import { TimelineDropzone } from "@/components/timeline-dropzone";
-import { Button, cx, Notice, ProgressBar, Segmented, Select } from "@/components/ui";
+import { Button, cx, Notice, ProgressBar, Segmented, Select, Toggle } from "@/components/ui";
 import { useUpload } from "@/components/upload-provider";
 import { api, DEFAULT_OPTIONS, type JobOptions } from "@/lib/api";
 import { fileSize, LANGUAGE_OPTIONS, timecode } from "@/lib/format";
@@ -260,6 +260,30 @@ export default function NewVideoPage() {
                   </span>
                   <input type="range" min={0} max={90} step={1} value={options.min_score ?? minScoreDefault} onChange={(e) => set("min_score", Number(e.target.value))} className="w-full" />
                   <span className="mt-1 block text-[13px] text-faint">Lower it to get more clips from a weak video; raise it to keep only the strongest.</span>
+                </label>
+                <Toggle
+                  label="Review the transcript before rendering"
+                  hint="Pauses after the clips are chosen so you can fix misheard words. Nothing is rendered until you continue."
+                  checked={options.review_transcript}
+                  onChange={(v) => set("review_transcript", v)}
+                />
+                <Toggle
+                  label="Smart punch-in zoom"
+                  hint="A small, eased zoom on words the speaker really stresses. Only on clips that follow a face."
+                  checked={options.smart_zoom}
+                  onChange={(v) => set("smart_zoom", v)}
+                />
+                <label className="block max-w-md">
+                  <span className="mb-2 block text-sm text-muted">Names and terms (optional)</span>
+                  <input
+                    type="text"
+                    value={options.glossary}
+                    maxLength={400}
+                    placeholder="e.g. ViralCut, Kubernetes, Dra. Almeida"
+                    onChange={(e) => set("glossary", e.target.value)}
+                    className="h-11 w-full rounded-lg border border-line bg-panel px-3 text-fg placeholder:text-faint"
+                  />
+                  <span className="mt-1 block text-[13px] text-faint">Comma separated. The speech recogniser prefers these spellings.</span>
                 </label>
                 <Segmented
                   label="Framing"

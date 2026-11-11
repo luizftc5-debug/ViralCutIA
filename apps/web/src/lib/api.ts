@@ -2,7 +2,7 @@
 
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
-export type CaptionStyle = "high_retention" | "clean_editorial" | "dynamic_creator" | "gaming";
+export type CaptionStyle = "viral_dynamic" | "high_retention" | "clean_editorial" | "dynamic_creator" | "gaming";
 export type FramingMode = "auto" | "face" | "split" | "blur" | "center";
 
 export interface CaptionOptions {
@@ -25,6 +25,9 @@ export interface JobOptions {
   aspect: "9:16";
   style: "auto" | "dynamic" | "editorial" | "podcast" | "gaming";
   framing: FramingMode;
+  smart_zoom: boolean;
+  review_transcript: boolean;
+  glossary: string;
   min_score: number | null;
 }
 
@@ -103,6 +106,7 @@ export interface Analysis {
   mode?: "speech" | "signals";
   language?: string;
   transcription?: string;
+  asr?: { mode?: string; model?: string; dropped_segments?: { start: number; end: number; text: string; reason: string }[]; recovered_gaps?: { start: number; end: number; words: number }[] };
   words?: number;
   candidates?: number;
   requested?: number;
@@ -115,7 +119,7 @@ export interface Analysis {
 
 export interface Job {
   id: string;
-  status: "uploaded" | "queued" | "processing" | "completed" | "failed" | "canceled";
+  status: "uploaded" | "queued" | "processing" | "review" | "completed" | "failed" | "canceled";
   stage: string;
   progress: number;
   stages: Stage[];
@@ -189,9 +193,34 @@ export const api = {
   remove: (id: string) => request<void>(`/api/jobs/${id}`, { method: "DELETE" }),
   logs: (id: string, after = 0) => request<{ logs: LogEntry[] }>(`/api/jobs/${id}/logs?after=${after}`),
   clip: (jobId: string, clipId: string) => request<Clip>(`/api/jobs/${jobId}/clips/${clipId}`),
+  transcript: (id: string) => request<Transcript>(`/api/jobs/${id}/transcript`),
+  saveTranscript: (id: string, body: TranscriptUpdate) =>
+    request<{ changed: number; affected_clips: string[]; words: number }>(`/api/jobs/${id}/transcript`, { method: "PUT", ...json(body) }),
+  resume: (id: string) => request<Job>(`/api/jobs/${id}/resume`, { method: "POST" }),
   updateClip: (jobId: string, clipId: string, body: ClipUpdate) =>
     request<Clip>(`/api/jobs/${jobId}/clips/${clipId}`, { method: "PATCH", ...json(body) }),
 };
+
+export interface TranscriptWord {
+  index: number;
+  text: string;
+  start: number;
+  end: number;
+  confidence: number;
+}
+
+export interface Transcript {
+  language: string;
+  engine: string;
+  words: TranscriptWord[];
+  quality: { dropped_segments?: { start: number; end: number; text: string; reason: string }[] };
+  edited: boolean;
+}
+
+export interface TranscriptUpdate {
+  words?: { index: number; text: string }[];
+  replace?: { find: string; replace: string; case_sensitive?: boolean }[];
+}
 
 export interface ClipUpdate {
   start?: number;
@@ -257,5 +286,8 @@ export const DEFAULT_OPTIONS: JobOptions = {
   aspect: "9:16",
   style: "auto",
   framing: "auto",
+  smart_zoom: true,
+  review_transcript: false,
+  glossary: "",
   min_score: null,
 };

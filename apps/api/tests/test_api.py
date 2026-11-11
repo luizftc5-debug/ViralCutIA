@@ -17,7 +17,13 @@ def test_health_and_config(client):
     assert client.get("/api/health").json()["status"] == "ok"
     cfg = client.get("/api/config").json()
     assert cfg["limits"]["formats"] == ["MP4", "MOV", "MKV", "WEBM"]
-    assert len(cfg["caption_styles"]) == 4
+    assert [s["key"] for s in cfg["caption_styles"]] == [
+        "viral_dynamic",
+        "high_retention",
+        "clean_editorial",
+        "dynamic_creator",
+        "gaming",
+    ]
     assert cfg["engine"]["llm_enabled"] is False and cfg["engine"]["narrative_analysis"] == "heuristic"
 
 

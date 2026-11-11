@@ -22,12 +22,13 @@ log = logging.getLogger(__name__)
 # (key, label, weight in overall progress)
 STAGES: list[tuple[str, str, float]] = [
     ("analyzing", "Analyzing video", 0.10),
-    ("transcribing", "Transcribing speech", 0.28),
+    ("transcribing", "Transcribing speech", 0.27),
     ("discovering", "Discovering high-impact moments", 0.04),
     ("ranking", "Ranking clips", 0.04),
-    ("reframing", "Smart reframing", 0.12),
+    ("syncing", "Syncing captions to the audio", 0.05),
+    ("reframing", "Smart reframing", 0.10),
     ("subtitles", "Generating subtitles", 0.02),
-    ("rendering", "Rendering videos", 0.40),
+    ("rendering", "Rendering videos", 0.38),
     ("ready", "Ready to publish", 0.0),
 ]
 STAGE_KEYS = [k for k, _, _ in STAGES]

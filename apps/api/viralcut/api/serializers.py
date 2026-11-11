@@ -65,6 +65,8 @@ def clip_out(clip: Clip, detail: bool = False) -> dict[str, Any]:
                 "size_bytes",
                 "bit_rate",
                 "mean_volume_db",
+                "integrated_lufs",
+                "true_peak_db",
             )
         }
         if clip.qa
@@ -84,6 +86,7 @@ def clip_out(clip: Clip, detail: bool = False) -> dict[str, Any]:
         out["transcript"] = clip.transcript
         out["pages"] = clip.pages or []
         out["details"] = dims.get("details", {})
+        out["alignment"] = (clip.framing or {}).get("align")
     return out
 
 

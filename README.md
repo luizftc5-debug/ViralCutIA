@@ -16,15 +16,16 @@ No system can guarantee virality, and this one does not claim to: see
 | Area | Implemented |
 |---|---|
 | Upload | Drag and drop, MP4/MOV/MKV/WebM, streamed with real progress, validated by content (not just extension), size and duration limits |
-| Analysis | faster-whisper transcription with word timestamps (multilingual), loudness/silence analysis, motion and shot-change detection |
+| Analysis | faster-whisper transcription (`fast` / `balanced` / `accurate` modes, `large-v3-turbo` by default on 4+ cores) with an evidence filter that discards music/noise hallucinations and re-transcribes speech Whisper skipped, CTC forced alignment of word times (Portuguese, English), loudness/silence analysis, motion and shot-change detection. [Measured results](docs/TRANSCRIPTION.md) |
 | Selection | Sentence-aligned candidates, Hook Detection Engine (7 hook types), six-dimension Viral Potential Score with an explanation, temporal and semantic de-duplication, minimum-score cut-off |
 | Optional LLM | With an Anthropic API key, Claude re-rates shortlisted moments and writes titles/captions grounded in the transcript. Without it the engine is heuristic and says so |
 | Reframing | YuNet face tracking per shot, smoothed crop path, split screen for two speakers, blurred-backdrop layout, vertical sources kept as they are |
+| Editing decisions | Content profile from evidence (podcast, gaming, education, entertainment, storytelling), eased punch-in zoom on words the speaker really stresses (face-tracked clips only), pause trimming per profile, leading disfluencies dropped. Every decision is stored with its reason |
 | Trimming | Shortens pauses only where the audio is actually silent; keeps a beat after questions |
-| Captions | Four styles (High Retention, Clean Editorial, Dynamic Creator, Gaming), per-word timing, keyword highlight, size/position/colour/typeface, platform safe areas, accents, burned in or off, SRT sidecar |
-| Rendering | One ffmpeg pass per clip: H.264 High + AAC, 1080×1920 (720×1280 for low-resolution sources), source frame rate up to 60 fps, faststart, loudness normalised |
-| QA | Codec, resolution, orientation, frame rate, duration, A/V sync, faststart, full decode and non-silent audio verified for every file |
-| Studio | Preview, score breakdown, move start/end, fix caption text, change caption style and framing, re-render, download MP4/SRT, export all as ZIP |
+| Captions | Five presets (**Viral Dynamic**, **Creator High Retention**, **Premium Minimal**, **Gaming / Entertainment**, Dynamic Creator), aligned per-word timing, captions leave with the speech, keyword emphasis, size/position/colour/typeface, platform safe areas (verified by rasterising the worst case), captions placed in the blurred band of letterboxed footage, accents, burned in or off (`Add subtitles? yes/no`), SRT sidecar |
+| Rendering | One ffmpeg pass per clip: H.264 High + AAC, 1080×1920 (720×1280 for low-resolution sources; the native source crop is reported, never presented as higher resolution), source frame rate up to 60 fps, BT.709 signalled, VBV-capped, faststart, **two-pass EBU R128 loudness to −14 LUFS / −1.5 dBTP** with only the speech treatments the measurements justify |
+| QA | Codec, resolution, orientation, frame rate, duration, A/V sync, faststart, full decode, non-silent audio, **integrated loudness, true peak, 48 kHz stereo and square pixels** verified for every file with ffprobe/ffmpeg |
+| Studio | Preview (the rendered MP4, so preview and export are identical), score breakdown, move start/end, fix caption text, change caption style and framing, re-render, download MP4/SRT, export all as ZIP. **Optional transcript review before rendering**: pause after the clips are chosen, correct words everywhere (find and replace), continue |
 | Jobs | Persistent queue with real per-stage progress, logs, cancel, controlled retry, crash recovery, automatic deletion after the retention period |
 
 ## Quick start
@@ -39,7 +40,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open http://localhost:3000. The first job downloads the speech model (about 480 MB for `small`).
+Open http://localhost:3000. The first job downloads the speech model (about 1.6 GB for the default `large-v3-turbo`, 480 MB for `small`) and the two alignment models (about 240 MB for Portuguese, 380 MB for English).
 
 ### Without Docker
 
@@ -94,7 +95,9 @@ matter most:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `VIRALCUT_WHISPER_MODEL` | `small` | Speech model. `medium` / `large-v3` are more accurate and slower; use a GPU with `VIRALCUT_WHISPER_DEVICE=cuda` |
+| `VIRALCUT_TRANSCRIPTION_MODE` | `auto` | `auto`: `large-v3` on a GPU, `large-v3-turbo` on a CPU with 4+ cores, `small` below that. `fast` / `balanced` / `accurate` force a mode |
+| `VIRALCUT_WHISPER_MODEL` | empty | An explicit model (`tiny` … `large-v3`, `large-v3-turbo`) always wins over the mode |
+| `VIRALCUT_ALIGN_MODE` | `auto` | CTC forced alignment of word timestamps for Portuguese and English (`off` keeps Whisper's timestamps) |
 | `ANTHROPIC_API_KEY` | unset | Enables LLM narrative rating and written titles. Only transcript text is sent |
 | `VIRALCUT_MIN_SCORE` | `60` | Clips below this score are not rendered |
 | `VIRALCUT_SCORE_WEIGHTS` | built in | JSON override of the six score weights |
@@ -138,7 +141,11 @@ make lint
 |---|---|
 | `apps/api/tests/test_security.py` | File-name sanitising, container sniffing, path traversal |
 | `test_analysis.py` | Sentences, hooks (English and Portuguese), scoring, topic unity, de-duplication, extractive copy |
-| `test_captions.py` | Pagination, safe-area layout, accents, options, SRT, text edits |
+| `test_captions.py`, `test_caption_quality.py` | Pagination, accents, options, SRT, text edits; **timing (no caption outlives its speech), every word shown exactly once, and rasterised safe-area geometry for every preset and position** |
+| `test_evaluation.py`, `test_transcribe_guard.py`, `test_align.py` | WER metric, the no-fabrication rules (with the real measured hallucination), recognition modes, CTC alignment against exact synthetic ground truth |
+| `test_editing.py`, `test_render_polish.py`, `test_zoom_on_a_face.py` | Content profile and zoom planning, **measured** punch-in (image registration on a real face), two-pass loudness and true peak, colour signalling |
+| `test_transcript_review.py` | Manual correction keeps timings and the original, re-render and resume behaviour |
+| `test_speech_e2e.py` | **Real human speech (FLEURS, Portuguese and English) end to end**: WER against the reference, forced alignment, burned captions vs. the audio's own voice activity, captions-off render is clean, review flow |
 | `test_media.py` | Trimming, reframing layouts, filter graph, **real renders and QA** on generated media |
 | `test_llm.py` | LLM blending and failure fallback with a stub client |
 | `test_api.py` | Upload validation, full job flow, edit and re-render, cancel, retry, retention |
@@ -163,9 +170,7 @@ These are real constraints of this version, stated so nobody is surprised by the
   rely on language-agnostic signals unless an LLM key is configured.
 * **The LLM path has not been run against the live Anthropic API** in this repository's test
   runs (no key was available). It is covered by tests with a stub client only.
-* **Transcription quality follows the model.** The default `small` model makes mistakes,
-  especially on names, jargon and noisy audio; the studio lets you correct captions. One language
-  is assumed per video. There is no speaker diarisation.
+* **Transcription quality follows the model and the audio.** Measured Word Error Rates (clean read speech, music, noise, fast speech) are in [docs/TRANSCRIPTION.md](docs/TRANSCRIPTION.md); noisy recordings (speech only 5 dB above broadband noise) are still hard (tens of percent WER in English with the best model measured). Names and jargon benefit from the glossary and the transcript review. One language is assumed per video. There is no speaker diarisation.
 * **Reframing follows faces.** There is no active-speaker detection, object or gameplay
   saliency model. Footage without faces uses the blurred-backdrop layout; choose centre crop in
   the studio if you prefer.
@@ -183,6 +188,8 @@ These are real constraints of this version, stated so nobody is surprised by the
 * **CPU speed.** Processing is CPU-bound without a GPU; transcription dominates on long videos.
   Measured on 4 CPU cores with the `small` model: a 2-minute 1080p video produced 4 clips in
   about 1.5 minutes, and a 10-minute 1080p video produced 8 clips in 4 min 42 s.
+* **Not implemented** (stated so nobody assumes otherwise): reordering a clip to open with a later line (a "cold open"; it can mislead, so the engine only removes lead-in), active-speaker tracking, a gameplay saliency model, background-music ducking (the app adds no music, so there is nothing to duck).
+* **Verified with synthetic and read-speech material**, not with a labelled set of real creator videos: the content classifier, the zoom thresholds and the denoise trigger are heuristics whose decisions are explained per clip but whose *taste* is unmeasured.
 * The interface is in English only.
 
 ## Roadmap
@@ -192,7 +199,7 @@ These are real constraints of this version, stated so nobody is surprised by the
    and durations.
 3. Active-speaker detection and diarisation for multi-person framing and speaker-coloured captions.
 4. Saliency-based framing for gameplay and screen recordings.
-5. WhisperX-style forced alignment and larger models on GPU workers.
+5. Forced alignment for more languages (a permissive CTC model per language) and GPU workers.
 6. More aspect ratios (1:1, 4:5), brand kits (fonts, colours, logo), caption templates.
 7. Direct publishing to platforms through their official APIs.
 8. Interface localisation, starting with Portuguese.

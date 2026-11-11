@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 
 import { ClipRow } from "@/components/clip-row";
 import { SiteHeader } from "@/components/site-header";
+import { TranscriptReview } from "@/components/transcript-review";
 import { JobLog, StageList } from "@/components/stage-list";
 import { Button, buttonClass, Notice, ProgressBar } from "@/components/ui";
 import { api, DEFAULT_OPTIONS, exportUrl, type Job, type JobOptions } from "@/lib/api";
@@ -177,6 +178,15 @@ export default function JobPage() {
                 Delete this upload
               </Button>
             </div>
+          </section>
+        )}
+        {job.status === "review" && (
+          <section className="mt-3">
+            <h1 className="text-4xl font-semibold">Check the transcript</h1>
+            <p className="mt-4 max-w-2xl text-muted">
+              {job.clips.length} clip{job.clips.length === 1 ? "" : "s"} chosen. Fix any misheard words now and they are corrected in every caption, then continue to render.
+            </p>
+            <TranscriptReview jobId={job.id} busy={busy} onContinue={() => act(() => api.resume(job.id))} />
           </section>
         )}
         {job.status === "uploaded" && (

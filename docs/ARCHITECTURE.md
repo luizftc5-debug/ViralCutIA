@@ -59,15 +59,17 @@ Each stage is a module with a narrow interface and its own tests.
 |---|---|---|---|
 | 1 | Video ingestion | `api/routes.py`, `security.py` | Streamed upload, size limit, extension + magic-byte check |
 | 2 | Media probing | `pipeline/probe.py` | ffprobe → duration, display size, fps, codecs, HDR flag |
-| 3 | Transcription | `pipeline/transcribe.py` | faster-whisper, word timestamps, VAD, model fallback chain |
+| 3 | Transcription | `pipeline/transcribe.py` | faster-whisper (mode/hardware-driven model), Silero VAD, evidence filter against invented speech, re-transcription of skipped speech, glossary, model fallback chain |
+| 3b | Caption sync | `pipeline/align.py` | Per clip: CTC forced alignment (wav2vec2 via onnxruntime, Portuguese and English) of the recognised words, then loudness-envelope refinement of pause boundaries. Whisper timestamps are the fallback |
 | 4 | Scene and audio analysis | `pipeline/audio.py`, `pipeline/visual.py` | Loudness envelope, noise floor, silences; motion timeline, shot changes |
 | 5 | Candidate generation | `pipeline/candidates.py`, `pipeline/text.py` | Sentence segmentation; every sentence-aligned span in the duration range |
 | 6 | Hook analysis | `pipeline/hooks.py` | Seven hook types measured on the first ~3 s |
 | 7 | Scoring and ranking | `pipeline/scoring.py`, `pipeline/selection.py`, `pipeline/llm.py` | Six-dimension score, optional LLM blend, temporal + semantic de-duplication |
 | 8 | Smart cropping | `pipeline/reframe.py` | YuNet face tracks per shot → crop path, split, blur or fit layout |
+| 8b | Editing decisions | `pipeline/editing.py` | Content profile with evidence, punch-in planning on stressed words, opening tightening |
 | 9 | Subtitle generation | `pipeline/captions.py` | Pagination, measured layout, ASS (burn-in) and SRT |
-| 10 | Rendering | `pipeline/render.py`, `pipeline/trimming.py` | Silence-aware trimming, filter graph, H.264/AAC MP4 |
-| 11 | Quality assurance | `pipeline/qa.py` | Codec, size, fps, duration, A/V sync, faststart, full decode, loudness |
+| 10 | Rendering | `pipeline/render.py`, `pipeline/trimming.py` | Silence-aware trimming, filter graph (with eased punch-in), two-pass loudness, H.264/AAC MP4 |
+| 11 | Quality assurance | `pipeline/qa.py` | Codec, size, fps, duration, A/V sync, faststart, full decode, integrated loudness, true peak, sample rate, SAR |
 | 12 | Export | `api/routes.py` | Range-enabled streaming, downloads, SRT, ZIP with publishing notes |
 
 `pipeline/orchestrator.py` runs them in order, reports real progress per stage, and persists the
@@ -78,6 +80,7 @@ re-analysing the video.
 
 ```
 uploaded ──start──▶ queued ──claim──▶ processing ──▶ completed
+                                           │  └─ review_transcript ─▶ review ──resume──▶ queued
                       ▲                   │  ├──▶ failed      (user-facing error, or retries exhausted)
                       └──── retry ────────┘  └──▶ canceled    (cancel flag polled between and inside stages)
 ```
@@ -106,6 +109,16 @@ associated into per-person tracks, and each shot gets one layout:
 * `blur` — the whole frame over a blurred, darkened copy of itself when there is nobody to follow.
   It is also the default for the Gaming style, where the action is rarely where the face is.
 * `fit` — the source is already vertical.
+
+## Editing decisions
+
+`pipeline/editing.py` never applies a template. For each clip it classifies the content from
+measurable signals (vocabulary density with a minimum number of hits, face presence, motion,
+speech rate, vocal dynamics), keeps the scores and the matched evidence, and derives the editing
+parameters from the result. A punch-in is planned only on a word that is louder than that
+speaker's own baseline (or a number / key term with some lift), spaced out, eased with a
+smoothstep, kept away from the opening, the ending and hard cuts, and applied only to face-tracked
+`crop` layouts. The plan, with each decision's reason, is stored in `clip.framing["edit"]`.
 
 ## Captions
 
