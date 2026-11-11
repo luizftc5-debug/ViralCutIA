@@ -47,19 +47,19 @@ STYLES: dict[str, StyleSpec] = {
         label="High Retention",
         description="Bold word-by-word captions with a controlled colour highlight on the spoken word.",
         font="poppins", weight="heavy", size=118, upper=True, max_words=3, max_lines=2, max_chars=13,
-        outline=8, shadow=3, blur=0.6, accent="#FFD60A", active="color",
+        outline=8, shadow=3, blur=0.6, accent="#FFD60A", active="color", line_spacing=0.96,
     ),
     "clean_editorial": StyleSpec(
         label="Clean Editorial",
         description="Quiet, elegant lines that reveal as they are spoken.",
         font="inter", weight="medium", size=72, upper=False, max_words=7, max_lines=2, max_chars=24,
-        outline=1.6, shadow=1.5, blur=2.2, accent="#F2C879", active="reveal", line_spacing=1.24, strip_punct=False,
+        outline=1.6, shadow=1.5, blur=2.2, accent="#F2C879", active="reveal", line_spacing=1.06, strip_punct=False,
     ),
     "dynamic_creator": StyleSpec(
         label="Dynamic Creator",
         description="A highlight block follows the voice from word to word.",
         font="poppins", weight="bold", size=100, upper=False, max_words=4, max_lines=2, max_chars=14,
-        outline=5, shadow=2, blur=0.5, accent="#2F6BFF", active="box", line_spacing=1.28,
+        outline=5, shadow=2, blur=0.5, accent="#2F6BFF", active="box", line_spacing=1.14,
     ),
     "gaming": StyleSpec(
         label="Gaming / Entertainment",
@@ -410,7 +410,8 @@ def build_ass(pages: list[Page], opts: CaptionOptions, platform: str, width: int
                 t_off = min(max(t_off, t_on + 0.04), p.end)
                 base = f"\\an5\\pos({cx:.0f},{cy:.0f})\\fs{size:.1f}\\blur{spec.blur}"
                 fade_in = "\\fad(70,0)" if anim else ""
-                after_col = accent if w.emph else white
+                # the box style already carries the accent; coloured text next to it would fight for attention
+                after_col = accent if (w.emph and spec.active != "box") else white
 
                 if spec.active == "reveal":
                     dim, full = "\\1a&H99&\\3a&HB0&\\4a&HD0&", "\\1a&H00&\\3a&H50&\\4a&H90&"

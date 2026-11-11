@@ -256,3 +256,45 @@ def test_source_without_audio_gets_silent_track(no_audio_video, tmp_path):
         source_has_audio=False,
     )
     assert report["passed"], report["checks"]
+
+
+def test_split_layout_moves_bottom_captions_to_the_seam(tmp_path):
+    from viralcut.options import CaptionOptions
+    from viralcut.pipeline.orchestrator import Artifacts, ClipPlan, step_captions
+    from viralcut.pipeline.reframe import FramingPlan
+    from viralcut.pipeline.transcribe import Transcript
+    from viralcut.pipeline.visual import VisualSignals
+    from viralcut.storage import LocalStorage
+
+    panel = {"x": 0, "y": 0, "w": 900, "h": 800}
+    words = [Word("hello", 0.2, 0.6), Word("there", 0.7, 1.1)]
+    art = Artifacts(
+        MEDIA,
+        "isobmff",
+        Transcript(),
+        silent_signals(10),
+        VisualSignals(np.zeros(40, dtype=np.float32), []),
+        [],
+    )
+    storage, job_id, clip_id = LocalStorage(tmp_path), "a" * 32, "b" * 32
+
+    def ys(layout):
+        cp = ClipPlan(
+            clip_id,
+            0.0,
+            5.0,
+            words,
+            plan=FramingPlan([Shot(0.0, 5.0, layout)]),
+            out_words=words,
+            duration=5.0,
+        )
+        step_captions(cp, art, storage, job_id, CaptionOptions(position="bottom"), "universal")
+        text = cp.ass_path.read_text()
+        import re
+
+        return [float(m.group(1)) for m in re.finditer(r"\\pos\([0-9.]+,([0-9.]+)\)", text)], cp
+
+    split_y, cp = ys({"type": "split", "top": panel, "bottom": panel})
+    crop_y, _ = ys({"type": "blur"})
+    assert max(split_y) < 1920 * 0.6 < min(crop_y)
+    assert any("middle" in n for n in cp.plan.notes)

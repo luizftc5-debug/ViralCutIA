@@ -69,8 +69,11 @@ def synth(text: str, voice: str, out: Path, tts: str | None, tmp: Path) -> None:
     if tts:
         txt = tmp / (out.stem + ".txt")
         txt.write_text(text, encoding="utf-8")
-        cmd = tts.format(text=shlex.quote(str(txt)), out=shlex.quote(str(out)), voice=voice)
+        raw = tmp / (out.stem + ".raw.wav")
+        cmd = tts.format(text=shlex.quote(str(txt)), out=shlex.quote(str(raw)), voice=voice)
         subprocess.run(cmd, shell=True, check=True)  # noqa: S602 - developer-supplied command
+        # same pause between segments and same audio format as the built-in voice
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(raw), "-af", "apad=pad_dur=0.6", "-ar", "48000", "-ac", "2", str(out)])
         return
     txt = tmp / (out.stem + ".txt")
     txt.write_text(text, encoding="utf-8")

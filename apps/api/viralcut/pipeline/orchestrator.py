@@ -147,6 +147,14 @@ def step_captions(
     if not cp.out_words:
         return []
     ow, oh = output_size(art.media)
+    if (
+        opts.position == "bottom"
+        and cp.plan is not None
+        and any(s.layout["type"] == "split" for s in cp.plan.shots)
+    ):
+        # in a split screen the lower third is someone's face: captions sit on the seam instead
+        opts = opts.model_copy(update={"position": "middle"})
+        cp.plan.notes.append("captions moved to the middle so they do not cover the lower speaker")
     pages = cap.paginate(cp.out_words, opts, cp.duration, set(art.keywords[:10]))
     if not pages:
         return []
@@ -491,7 +499,9 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
         for i, cp in enumerate(plans):
             pages = step_captions(cp, art, storage, job_id, options.captions, options.platform)
             with session_scope() as s:
-                s.get(Clip, cp.clip_id).pages = pages
+                clip = s.get(Clip, cp.clip_id)
+                clip.pages = pages
+                clip.framing = cp.plan.to_dict()
             rep.progress((i + 1) / n, force=True)
         rep.log(
             "Captions burned in and SRT written."

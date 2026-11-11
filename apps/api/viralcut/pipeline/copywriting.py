@@ -11,7 +11,16 @@ import re
 
 from .candidates import Candidate
 from .scoring import AnalysisContext
-from .text import DEPENDENT_OPENERS, FILLERS, HOOK_PATTERNS, MILD_OPENERS, Sentence, lang_key, norm, tokenize
+from .text import (
+    DEPENDENT_OPENERS,
+    FILLERS,
+    HOOK_PATTERNS,
+    STRIPPABLE_OPENERS,
+    Sentence,
+    lang_key,
+    norm,
+    tokenize,
+)
 
 MAX_TITLE = 80
 
@@ -24,7 +33,7 @@ def clean_sentence(text: str, lk: str | None) -> str:
         if not toks or lk is None:
             break
         first = toks[0]
-        if first in DEPENDENT_OPENERS[lk] or first in MILD_OPENERS[lk] or first in FILLERS[lk]:
+        if first in STRIPPABLE_OPENERS[lk] or first in FILLERS[lk]:
             parts = text.split(" ", 1)
             if len(parts) < 2 or len(toks) < 4:
                 break
@@ -61,6 +70,11 @@ def _sentence_strength(s: Sentence, lk: str | None, keywords: set[str]) -> float
                 score += 1.0
     if not 4 <= s.n_words <= 18:
         score -= 1.5
+    if lk and s.tokens:
+        # a sentence that leans on the previous one ("That is why…", "It is…") does not work as a title
+        first = next((t for t in s.tokens if t not in STRIPPABLE_OPENERS[lk] and t not in FILLERS[lk]), "")
+        if first in DEPENDENT_OPENERS[lk]:
+            score -= 3.0
     return score
 
 
@@ -96,7 +110,12 @@ def extractive_copy(c: Candidate, ctx: AnalysisContext) -> tuple[list[str], str]
             body = shorten(f"{body} {nxt}", 180)
             if not body.endswith(("?", "!", "…", ".")):
                 body += "."
-    clip_tokens = [t for s in sents for t in s.content]
-    tags = [k for k in ctx.tfidf.keywords if k in clip_tokens and len(k) >= 4 and k.isalpha()][:3]
+    # hashtags: only topic words that recur across the video and appear in this clip
+    clip_tokens = {t for s in sents for t in s.content}
+    tags = [
+        k
+        for k in ctx.tfidf.keywords[:12]
+        if k in clip_tokens and len(k) >= 5 and k.isalpha() and ctx.tfidf.tf[k] >= 3
+    ][:3]
     caption = body + ("\n\n" + " ".join(f"#{t}" for t in tags) if tags else "")
     return titles, caption

@@ -137,6 +137,72 @@ MILD_OPENERS: dict[str, frozenset[str]] = {
     ),
     "pt": frozenset({"entao", "bom", "tipo", "ai", "ne", "olha", "agora", "enfim", "ah", "eh", "ta"}),
 }
+# Leading connectives/fillers that can be removed from a quoted sentence without changing its meaning.
+STRIPPABLE_OPENERS: dict[str, frozenset[str]] = {
+    "en": frozenset(
+        {
+            "and",
+            "but",
+            "so",
+            "because",
+            "or",
+            "also",
+            "then",
+            "plus",
+            "well",
+            "okay",
+            "ok",
+            "like",
+            "yeah",
+            "right",
+            "now",
+            "anyway",
+            "um",
+            "uh",
+        }
+    ),
+    "pt": frozenset(
+        {
+            "e",
+            "mas",
+            "entao",
+            "porque",
+            "ou",
+            "tambem",
+            "dai",
+            "pois",
+            "bom",
+            "tipo",
+            "ai",
+            "ne",
+            "olha",
+            "agora",
+            "enfim",
+            "ah",
+            "eh",
+        }
+    ),
+}
+# Frequent content words that say nothing about the topic (kept out of keywords and hashtags).
+GENERIC_WORDS: dict[str, frozenset[str]] = {
+    "en": frozenset(
+        """every single most many much even still back make made makes making take took takes come came want wanted need
+        needed look looked time times way ways people person good great better best thing things something anything
+        nothing everything someone anyone everyone first second third next last never always already maybe really
+        actually today tomorrow yesterday year years week weeks month months minute minutes hour hours later before
+        after only tell told talk talked feel felt give gave keep kept start started work worked little long whole
+        different same important sure real true okay right left high going getting doing being having""".split()
+    ),
+    "pt": frozenset(
+        """cada maioria muitos muitas ainda volta fazer feito fazendo tomar tomou vir veio quer quero precisa preciso
+        olhar tempo vezes jeito forma maneira pessoa pessoas bom boa melhor coisa coisas algo nada tudo alguem
+        ninguem primeiro segundo terceiro proximo ultimo nunca sempre talvez realmente verdade hoje amanha ontem ano
+        anos semana semanas mes meses minuto minutos hora horas depois antes apenas falar falou sentir dar deu manter
+        comecar comecou trabalhar pouco longo inteiro diferente mesmo importante certo real aqui agora entao porque
+        gente parte lado caso exemplo""".split()
+    ),
+}
+
 TRAILING_WORDS: dict[str, frozenset[str]] = {
     "en": frozenset({"and", "but", "or", "so", "because", "the", "a", "to", "of", "that", "with"}),
     "pt": frozenset({"e", "mas", "ou", "entao", "porque", "o", "a", "de", "que", "com", "para", "pra"}),
@@ -204,11 +270,13 @@ HOOK_PATTERNS: dict[str, dict[str, re.Pattern[str]]] = {
             r"here'?s how|here (?:is|are)|how to|the (?:best|fastest|easiest|simplest|right) way|tips?|tricks?|steps?|rules?|lessons?"
             r"|strategy|framework|method|formula|hack|you (?:need|should|must) |make sure|the key|stop doing|start doing"
             r"|number one|ways to|reasons (?:why|to)"
+            r"|(?:\d+|two|three|four|five|six|seven|ten) (?:[a-z]+ ){0,2}(?:ways|steps|tips|reasons|rules|things|mistakes|lessons|habits)"
         ),
         "pt": _rx(
             r"como fazer|a melhor (?:forma|maneira)|o (?:melhor )?jeito|dicas?|truques?|passos?|regras?|licao|licoes"
             r"|estrategia|metodo|formula|voce (?:precisa|deve|tem que)|a chave|pare de|comece a"
-            r"|numero um|formas de|maneiras de|motivos para|razoes para"
+            r"|numero um|formas de|maneiras de|motivos para|razoes para|aqui (?:esta|estao)"
+            r"|(?:\d+|dois|duas|tres|quatro|cinco|seis|sete|dez) (?:[a-z]+ ){0,2}(?:formas|maneiras|jeitos|passos|dicas|motivos|razoes|regras|coisas|erros|licoes|habitos)"
         ),
     },
     "tension": {
@@ -376,7 +444,7 @@ def build_sentences(words: list[Word], language: str = "") -> list[Sentence]:
 class TfIdf:
     """Sentence-level TF-IDF used for similarity, topic boundaries and keyword salience."""
 
-    def __init__(self, docs: list[list[str]]) -> None:
+    def __init__(self, docs: list[list[str]], generic: frozenset[str] | None = None) -> None:
         self.n = max(1, len(docs))
         df: Counter[str] = Counter()
         tf: Counter[str] = Counter()
@@ -386,7 +454,12 @@ class TfIdf:
         self.idf = {t: math.log((self.n + 1) / (c + 1)) + 1.0 for t, c in df.items()}
         self.tf = tf
         # keywords: recurring, reasonably specific content words
-        scored = [(c * min(1.6, self.idf[t] / 2.0), t) for t, c in tf.items() if c >= 2 and len(t) >= 4]
+        generic = generic or frozenset()
+        scored = [
+            (c * min(1.6, self.idf[t] / 2.0), t)
+            for t, c in tf.items()
+            if c >= 2 and len(t) >= 4 and t not in generic
+        ]
         scored.sort(reverse=True)
         self.keywords = [t for _, t in scored[:30]]
 

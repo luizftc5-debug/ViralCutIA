@@ -30,7 +30,7 @@ def select(
     *,
     max_clips: int,
     min_score: float,
-    max_overlap: float = 0.25,
+    max_overlap: float = 0.08,
     max_similarity: float = 0.55,
 ) -> list[Candidate]:
     """Greedy non-maximum suppression over time plus semantic de-duplication.

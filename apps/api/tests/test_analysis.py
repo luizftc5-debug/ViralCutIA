@@ -96,7 +96,7 @@ def test_selection_dedupes_and_respects_min_score():
     assert all(c.score >= 60 for c in chosen)
     for i, a in enumerate(chosen):
         for b in chosen[i + 1 :]:
-            assert temporal_overlap(a, b) <= 0.25
+            assert temporal_overlap(a, b) <= 0.08
     assert select(cands, ctx, max_clips=10, min_score=99) == []
 
 

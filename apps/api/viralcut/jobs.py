@@ -238,10 +238,17 @@ def purge_expired() -> int:
     """Retention: delete jobs (database rows and every file) past their expiry time."""
     storage = get_storage()
     with session_scope() as s:
-        ids = (
+        ids = list(
             s.execute(
                 select(Job.id).where(Job.expires_at < utcnow(), Job.status.notin_(("processing", "queued")))
             )
+            .scalars()
+            .all()
+        )
+        # uploads that never finished (client vanished, server restarted mid-transfer)
+        abandoned = utcnow() - dt.timedelta(hours=6)
+        ids += list(
+            s.execute(select(Job.id).where(Job.status == "uploading", Job.created_at < abandoned))
             .scalars()
             .all()
         )

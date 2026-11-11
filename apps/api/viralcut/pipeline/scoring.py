@@ -22,6 +22,7 @@ from .text import (
     CONTRAST_PATTERNS,
     DEPENDENT_OPENERS,
     FILLERS,
+    GENERIC_WORDS,
     HOOK_PATTERNS,
     MILD_OPENERS,
     PAYOFF_PATTERNS,
@@ -113,7 +114,7 @@ class AnalysisContext:
 
     @classmethod
     def build(cls, words, sentences, language, audio, visual, media) -> AnalysisContext:  # noqa: ANN001
-        tfidf = TfIdf([s.content for s in sentences])
+        tfidf = TfIdf([s.content for s in sentences], GENERIC_WORDS.get(lang_key(language) or ""))
         boundaries = topic_boundaries(sentences, tfidf)
         ctx = cls(
             words=words,

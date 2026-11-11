@@ -174,9 +174,11 @@ def analyze_hook(
     types = [{"type": k, "label": HOOK_LABELS[k], "strength": round(v, 2)} for k, v in ranked if v >= 0.45][
         :3
     ]
+    # what the UI quotes as "the hook": the whole first sentence when short, otherwise the first 3 seconds
+    quote = first.text if first.n_words <= 20 else opening_text.rstrip(",;: ") + "…"
     return HookResult(
         score=score,
-        text=opening_text,
+        text=quote,
         types=types,
         opener=opener,
         signals={k: round(v, 3) for k, v in strengths.items()},

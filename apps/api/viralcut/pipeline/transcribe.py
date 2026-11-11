@@ -156,6 +156,11 @@ def transcribe(
             text = w.word.strip()
             if not text:
                 continue
+            if words and not any(ch.isalnum() for ch in text):
+                # a stray symbol ("%", "…") belongs to the word before it, not on a caption of its own
+                words[-1].text += text
+                words[-1].end = max(words[-1].end, round(float(w.end), 3))
+                continue
             start = float(w.start)
             end = max(float(w.end), start + 0.02)
             if words and start < words[-1].end:  # keep the sequence monotonic

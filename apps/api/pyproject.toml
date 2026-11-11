@@ -34,7 +34,7 @@ viralcut-cli = "viralcut.cli:main"
 include = ["viralcut*"]
 
 [tool.setuptools.package-data]
-viralcut = ["assets/fonts/*", "assets/models/*"]
+viralcut = ["assets/fonts/*", "assets/models/*", "assets/licenses/*"]
 
 [tool.ruff]
 line-length = 110
