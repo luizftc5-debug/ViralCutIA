@@ -64,6 +64,17 @@ class FramingPlan:
             "notes": self.notes,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> FramingPlan:
+        shots = [Shot(float(x["start"]), float(x["end"]), dict(x["layout"])) for x in d.get("shots", [])]
+        return cls(
+            shots,
+            d.get("detector", "none"),
+            float(d.get("face_ratio", 0.0)),
+            d.get("mode", "auto"),
+            list(d.get("notes", [])),
+        )
+
 
 class FaceDetector:
     """YuNet (bundled ONNX) when OpenCV supports it, otherwise the classic Haar cascade."""
@@ -328,6 +339,31 @@ def merge_shots(shots: list[Shot], width: int) -> list[Shot]:
     return out
 
 
+SPEAKER_TIGHTEN = 0.86  # Speaker Focus keeps 86 % of the 9:16 window: a closer, more intimate frame
+
+
+def speaker_focus(plan: FramingPlan, media: MediaInfo) -> FramingPlan:
+    """Tighten every face-tracked crop around the speaker (Speaker Focus visual format).
+
+    The window shrinks around its own centre horizontally and keeps the upper part of the frame,
+    where the face is, vertically. Only ``crop`` layouts change; the source must still provide at
+    least 640 px of width so the result is never upscaled into mush.
+    """
+    shots = []
+    for sh in plan.shots:
+        lay = sh.layout
+        if lay.get("type") == "crop" and lay["w"] * SPEAKER_TIGHTEN >= 640 * 9 / 16:
+            cw = int(lay["w"] * SPEAKER_TIGHTEN // 2 * 2)
+            ch = int(round(cw * 16 / 9 / 2) * 2)
+            ch = min(ch, lay["h"])
+            dx = (lay["w"] - cw) / 2
+            y = lay["y"] + (lay["h"] - ch) * 0.3
+            lay = _crop_layout([(t, x + dx) for t, x in lay["keys"]], cw, ch, media.width, media.height, y)
+        shots.append(Shot(sh.start, sh.end, lay))
+    notes = [*plan.notes, "speaker focus: tighter frame around the tracked speaker"]
+    return FramingPlan(shots, plan.detector, plan.face_ratio, "speaker", notes)
+
+
 _PTS_RE = re.compile(r"pts_time:([0-9.]+)")
 
 
@@ -342,8 +378,11 @@ def plan_framing(
     should_cancel: CancelFn | None = None,
     max_shots: int = 40,
 ) -> FramingPlan:
+    if mode == "speaker":
+        plan = plan_framing(path, family, media, start, end, "face", on_progress, should_cancel, max_shots)
+        return speaker_focus(plan, media)
     duration = max(0.05, end - start)
-    if is_vertical(media) and mode in ("auto", "face", "split", "center"):
+    if is_vertical(media) and mode in ("auto", "face", "speaker", "split", "center"):
         cw, ch = crop_size(media.width, media.height)
         if cw == media.width and ch == media.height or abs(media.width / media.height - TARGET_ASPECT) < 0.01:
             return FramingPlan(

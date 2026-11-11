@@ -16,6 +16,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from ..config import get_settings
+from ..resources import active_plan
 from .editing import zoom_expression
 from .ffmpeg import CancelFn, ProgressFn, input_args, run_capture, run_ffmpeg
 from .probe import MediaInfo
@@ -103,6 +104,40 @@ def assign_zooms(segments: list[Segment], fps: Fraction, zooms: list) -> list:
     return applied
 
 
+def jump_cuts(segments: list[Segment]) -> list[int]:
+    """Indices of segments that start after removed source time (a jump cut, not a real shot change)."""
+    return [i for i in range(1, len(segments)) if segments[i].f0 > segments[i - 1].f1]
+
+
+def add_punch_transitions(
+    segments: list[Segment], fps: Fraction, amp: float, min_spacing: float = 1.6
+) -> int:
+    """Hide jump cuts with a quick punch: the incoming shot starts slightly closer and eases back.
+
+    Applied to every other eligible jump cut (repetition becomes a tic), only on face-tracked
+    ``crop`` segments long enough to settle, never overlapping a planned emphasis zoom. Timing is
+    unchanged, so captions stay in sync.
+    """
+    f = float(fps)
+    ramp, hold = 0.32, 0.18
+    added, last, toggle = 0, -99.0, False
+    for i in jump_cuts(segments):
+        seg = segments[i]
+        d = (seg.f1 - seg.f0) / f
+        if seg.layout.get("type") != "crop" or d < ramp + hold + 0.4:
+            continue
+        t0 = seg.out_start
+        if t0 - last < min_spacing or any(z[0] < t0 + ramp + hold + 0.3 for z in seg.zooms):
+            continue
+        toggle = not toggle
+        if not toggle:
+            continue
+        seg.zooms.insert(0, (t0 - ramp, t0 + hold + ramp, round(amp, 3), ramp))
+        last = t0
+        added += 1
+    return added
+
+
 def segment_boundaries(segments: list[Segment], fps: Fraction) -> list[float]:
     f = float(fps)
     out, cursor = [], 0.0
@@ -185,6 +220,8 @@ class AudioPolish:
     denoise_nr: float | None = None  # afftdn reduction in dB, only for genuinely noisy recordings
     noise_floor_db: float = -60.0
     compress: bool = False  # gentle 2:1 leveller, only when the speech level swings widely
+    presence: bool = False  # +2 dB around 3 kHz: consonant clarity for voice-led styles
+    join_fade: float = JOIN_FADE  # audio fade at each cut (longer for the smooth transition)
     measured: dict | None = None  # loudnorm pass-1 measurement of this exact clip
     report: dict = field(default_factory=dict)
 
@@ -192,8 +229,17 @@ class AudioPolish:
 LOUDNESS_TARGET = {"I": -14.0, "TP": -1.5, "LRA": 11.0}  # Shorts / Reels / TikTok playback level
 
 
-def plan_audio_polish(audio, t0: float, t1: float) -> AudioPolish:  # noqa: ANN001 - AudioSignals
-    """Decide, from measurements of this clip, which treatments are worth applying."""
+# Speech-level swing (dB, 95th - 20th percentile of active speech) above which a gentle leveller
+# is applied, per audio treatment of the video style. "natural" keeps the original dynamics.
+COMPRESS_ABOVE = {"natural": 24.0, "voice": 14.0, "punchy": 16.0}
+
+
+def plan_audio_polish(audio, t0: float, t1: float, mode: str = "natural") -> AudioPolish:  # noqa: ANN001 - AudioSignals
+    """Decide, from measurements of this clip, which treatments are worth applying.
+
+    ``mode`` comes from the video style: ``voice`` / ``punchy`` level speech sooner and add a
+    small presence lift; ``natural`` only intervenes when the level swings very widely.
+    """
     import numpy as np
 
     pol = AudioPolish()
@@ -210,9 +256,16 @@ def plan_audio_polish(audio, t0: float, t1: float) -> AudioPolish:  # noqa: ANN0
         pol.denoise_nr = float(np.clip(4.0 + (14.0 - snr) * 0.6, 4.0, 9.0))
         pol.noise_floor_db = float(np.clip(audio.noise_floor_db, -60.0, -28.0))
         pol.report["applied"].append(f"noise reduction {pol.denoise_nr:.0f} dB (SNR only {snr:.0f} dB)")
-    if spread > 20.0:
+    limit = COMPRESS_ABOVE.get(mode, 20.0)
+    if spread > limit:
         pol.compress = True
-        pol.report["applied"].append(f"gentle 2:1 levelling (speech level swings {spread:.0f} dB)")
+        pol.report["applied"].append(
+            f"gentle 2:1 levelling (speech level swings {spread:.0f} dB > {limit:.0f} dB)"
+        )
+    if mode in ("voice", "punchy") and len(active) > 20:
+        pol.presence = True
+        pol.report["applied"].append("presence lift +2 dB at 3 kHz (speech clarity)")
+    pol.report["treatment"] = mode
     return pol
 
 
@@ -226,6 +279,8 @@ def _polish_chain(polish: AudioPolish | None) -> str:
         parts.append(f"afftdn=nr={polish.denoise_nr:.1f}:nf={polish.noise_floor_db:.0f}:tn=1")
     if polish.compress:
         parts.append("acompressor=threshold=0.063:ratio=2:attack=15:release=250:makeup=1.5")
+    if polish.presence:
+        parts.append("equalizer=f=3000:t=q:w=1.0:g=2")
     return ",".join(parts)
 
 
@@ -299,8 +354,9 @@ def audio_parts(
         t0, t1 = seg.f0 / f, seg.f1 / f
         d = t1 - t0
         fades = ""
-        if n > 1 and d > 4 * JOIN_FADE:
-            fades = f",afade=t=in:st=0:d={JOIN_FADE},afade=t=out:st={d - JOIN_FADE:.4f}:d={JOIN_FADE}"
+        jf = polish.join_fade if polish is not None else JOIN_FADE
+        if n > 1 and d > 4 * jf:
+            fades = f",afade=t=in:st=0:d={jf},afade=t=out:st={d - jf:.4f}:d={jf}"
         parts.append(f"[a{i}]atrim=start={t0:.6f}:end={t1:.6f},asetpts=PTS-STARTPTS{fades}[as{i}]")
     a_last = "as0"
     if n > 1:
@@ -349,7 +405,7 @@ def measure_loudness(
     cmd = [
         "ffmpeg", "-hide_banner", "-nostdin", "-v", "info",
         *input_args(Path(source).resolve(), family, seek=clip_start, duration=span),
-        "-filter_complex", graph, "-map", "[aout]", "-f", "null", "-",
+        "-vn", "-filter_complex", graph, "-map", "[aout]", "-f", "null", "-",
     ]  # fmt: skip
     res = run_capture(cmd, timeout=get_settings().ffmpeg_timeout_s)
     if res.returncode != 0:
@@ -391,9 +447,13 @@ def render_clip(
     on_progress: ProgressFn | None = None,
     should_cancel: CancelFn | None = None,
     polish: AudioPolish | None = None,
+    *,
+    quality: str = "high",
+    loudness_memo=None,  # noqa: ANN001 - orchestrator.ClipCache: reuses pass 1 when the audio graph is unchanged
 ) -> dict:
     """Render one clip. Returns the parameters used (for QA and logs)."""
     s = get_settings()
+    plan = active_plan()
     fps = output_fps(media)
     ow, oh = output_size(media)
     f = float(fps)
@@ -409,7 +469,21 @@ def render_clip(
         assert ass_path.parent.resolve() == workdir.resolve()
 
     if s.normalize_audio and media.has_audio and polish is not None:
-        polish.measured = measure_loudness(source, family, media, clip_start, segments, fps, polish, span)
+        # pass 1 depends only on the audio graph: a caption or framing edit does not change it
+        lkey = (
+            "loud-v1",
+            round(clip_start, 4),
+            [(g.f0, g.f1) for g in segments],
+            str(fps),
+            _polish_chain(polish),
+        )
+        hit = loudness_memo.get(*lkey) if loudness_memo is not None else None
+        if hit is not None:
+            polish.measured = hit.get("measured")
+        else:
+            polish.measured = measure_loudness(source, family, media, clip_start, segments, fps, polish, span)
+            if loudness_memo is not None:
+                loudness_memo.put({"measured": polish.measured}, *lkey)
         polish.report["loudness_pass"] = (
             "two-pass linear" if polish.measured else "single-pass (no measurement)"
         )
@@ -417,6 +491,9 @@ def render_clip(
             polish.report["measured_lufs"] = float(polish.measured["input_i"])
             polish.report["measured_true_peak_db"] = float(polish.measured["input_tp"])
     graph = build_filtergraph(segments, media, fps, ow, oh, ass_name, s.normalize_audio, polish)
+    # "max" export: lower CRF and a slower preset (measured trade-off in docs/PERFORMANCE.md)
+    crf = max(12, s.x264_crf - 2) if quality == "max" else s.x264_crf
+    preset = "slow" if quality == "max" else plan.x264_preset
     tmp_out = out_path.with_suffix(".tmp.mp4")
     args = [*input_args(Path(source).resolve(), family, seek=clip_start, duration=span)]
     if not media.has_audio:
@@ -424,7 +501,8 @@ def render_clip(
     args += [
         "-filter_complex", graph,
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", s.x264_preset, "-crf", str(s.x264_crf),
+        "-filter_complex_threads", str(plan.threads),
+        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
         "-profile:v", "high", "-pix_fmt", "yuv420p",
         "-maxrate", f"{16 if oh >= 1920 else 8}M", "-bufsize", f"{32 if oh >= 1920 else 16}M",  # cap spikes, keep CRF quality
         *_color_tags(media),
@@ -435,8 +513,7 @@ def render_clip(
         "-movflags", "+faststart",
         "-f", "mp4",
     ]  # fmt: skip
-    if s.ffmpeg_threads > 0:
-        args += ["-threads", str(s.ffmpeg_threads)]
+    args += ["-threads", str(plan.threads)]  # encoder threads: the profile's budget, not every core
     args.append(tmp_out.name)
     try:
         run_ffmpeg(
@@ -456,8 +533,11 @@ def render_clip(
         "fps": f"{fps.numerator}/{fps.denominator}",
         "duration": round(out_duration, 3),
         "segments": len(segments),
-        "crf": s.x264_crf,
-        "preset": s.x264_preset,
+        "crf": crf,
+        "preset": preset,
+        "quality": quality,
+        "threads": plan.threads,
+        "profile": plan.profile,
         "zooms": sum(len(seg.zooms) for seg in segments),
         "audio": polish.report if polish is not None else {},
         "source_crop_px": _native_crop(segments, media),

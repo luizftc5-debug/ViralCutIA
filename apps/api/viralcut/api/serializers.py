@@ -19,6 +19,13 @@ def decision_notes(clip: Clip) -> list[str]:
     framing = clip.framing or {}
     edit = framing.get("edit") or {}
     notes = list(framing.get("notes", []))
+    style = edit.get("style")
+    if style:
+        notes.append(
+            f"Video style: {style['label']} at {style['intensity']} intensity ({style['reason']}); "
+            f"pauses kept up to {style['max_pause'] if style['max_pause'] is not None else 'any length'} s, "
+            f"cuts: {style['transition']}, audio: {style['audio']}."
+        )
     profile = edit.get("profile")
     if profile:
         why = profile["evidence"][0] if profile.get("evidence") else "no single signal dominated"
@@ -82,6 +89,12 @@ def clip_out(clip: Clip, detail: bool = False) -> dict[str, Any]:
         "captions": clip.captions or {},
         "framing_mode": clip.framing_mode,
         "smart_trim": clip.smart_trim,
+        "style": (clip.edit or {}).get("style", "auto"),
+        "intensity": (clip.edit or {}).get("intensity", "balanced"),
+        "quality": (clip.edit or {}).get("quality", "high"),
+        "applied_style": ((clip.framing or {}).get("edit") or {}).get("style"),
+        "variant": (clip.edit or {}).get("variant"),
+        "recommendation": (clip.edit or {}).get("recommendation"),
         "layouts": (clip.framing or {}).get("layouts", []),
         "framing_notes": decision_notes(clip),
         "has_captions_burned": bool((clip.qa or {}).get("captions_burned", False)),
@@ -137,6 +150,7 @@ def job_out(job: Job, include_clips: bool = True) -> dict[str, Any]:
                 "label": label,
                 "status": stages.get(key, {}).get("status", "pending"),
                 "progress": stages.get(key, {}).get("progress", 0.0),
+                "elapsed_s": stages.get(key, {}).get("elapsed_s"),
             }
             for key, label, _ in STAGES
         ],
@@ -157,5 +171,9 @@ def job_out(job: Job, include_clips: bool = True) -> dict[str, Any]:
         "expires_at": _iso(job.expires_at),
     }
     if include_clips:
-        out["clips"] = [clip_out(c) for c in job.clips]
+        # variations sit right after the version they belong to
+        ordered = sorted(
+            job.clips, key=lambda c: (c.rank, int(((c.edit or {}).get("variant") or {}).get("index", 1)))
+        )
+        out["clips"] = [clip_out(c) for c in ordered]
     return out

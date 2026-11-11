@@ -11,6 +11,7 @@ import struct
 from fractions import Fraction
 from pathlib import Path
 
+from ..resources import active_plan
 from .ffmpeg import run_capture
 
 
@@ -89,7 +90,7 @@ def verify_clip(
 
     # full decode: catches truncated/corrupt streams, and measures loudness of the result
     dec = run_capture(
-        ["ffmpeg", "-hide_banner", "-nostdin", "-v", "info", "-xerror", "-i", str(path), "-map", "0:v:0", "-map", "0:a:0?", "-af", "volumedetect,ebur128=peak=true", "-f", "null", "-"],
+        ["ffmpeg", "-hide_banner", "-nostdin", "-v", "info", "-xerror", "-threads", str(active_plan().threads), "-i", str(path), "-map", "0:v:0", "-map", "0:a:0?", "-af", "volumedetect,ebur128=peak=true", "-f", "null", "-"],
         timeout=600,
     )  # fmt: skip
     err = dec.stderr.decode("utf-8", "replace")

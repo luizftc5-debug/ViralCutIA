@@ -128,6 +128,7 @@ class JobReporter:
         self._last_cancel_check = 0.0
         self._cancelled = False
         self.stage = ""
+        self._stage_t0: dict[str, float] = {}
 
     def _update(self, mutate) -> None:  # noqa: ANN001
         with session_scope() as s:
@@ -146,6 +147,7 @@ class JobReporter:
 
     def start(self, stage: str) -> None:
         self.stage = stage
+        self._stage_t0[stage] = time.monotonic()
 
         def m(stages: dict) -> None:
             stages[stage] = {"status": "active", "progress": 0.0}
@@ -169,9 +171,13 @@ class JobReporter:
 
     def finish(self, stage: str | None = None, skipped: bool = False) -> None:
         stage = stage or self.stage
+        t0 = self._stage_t0.get(stage)
+        elapsed = round(time.monotonic() - t0, 2) if t0 is not None and not skipped else None
 
         def m(stages: dict) -> None:
             stages[stage] = {"status": "skipped" if skipped else "done", "progress": 1.0}
+            if elapsed is not None:
+                stages[stage]["elapsed_s"] = elapsed  # real time spent, shown in the UI and benchmarks
 
         self._update(m)
 

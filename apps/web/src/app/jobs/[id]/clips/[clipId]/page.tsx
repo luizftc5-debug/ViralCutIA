@@ -9,7 +9,8 @@ import { CaptionControls } from "@/components/caption-controls";
 import { ScoreNumber } from "@/components/score";
 import { SiteHeader } from "@/components/site-header";
 import { Button, buttonClass, Notice, ProgressBar, Segmented, Toggle } from "@/components/ui";
-import { api, ApiError, type CaptionOptions, type Clip, type ClipUpdate, DEFAULT_CAPTIONS, type FramingMode, mediaUrl } from "@/lib/api";
+import { VideoStylePicker } from "@/components/video-style-picker";
+import { api, ApiError, type AppConfig, type CaptionOptions, type Clip, type ClipUpdate, DEFAULT_CAPTIONS, type FramingMode, type Intensity, mediaUrl, type VideoStyle } from "@/lib/api";
 import { layoutName, timecode } from "@/lib/format";
 
 interface Draft {
@@ -18,8 +19,13 @@ interface Draft {
   captions: CaptionOptions;
   framing: FramingMode;
   smartTrim: boolean;
+  style: VideoStyle;
+  intensity: Intensity;
+  quality: "high" | "max";
   pages: Record<number, string>;
 }
+
+const normStyle = (s: Clip["style"]): VideoStyle => (s === "dynamic" ? "viral" : s === "editorial" ? "minimal" : s);
 
 function draftFrom(clip: Clip): Draft {
   return {
@@ -28,6 +34,9 @@ function draftFrom(clip: Clip): Draft {
     captions: { ...DEFAULT_CAPTIONS, ...clip.captions },
     framing: clip.framing_mode,
     smartTrim: clip.smart_trim,
+    style: normStyle(clip.style ?? "auto"),
+    intensity: clip.intensity ?? "balanced",
+    quality: clip.quality ?? "high",
     pages: {},
   };
 }
@@ -72,6 +81,10 @@ export default function ClipStudioPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const [nonce, setNonce] = useState(0);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  useEffect(() => {
+    api.config().then(setConfig).catch(() => undefined);
+  }, []);
 
   // Load the clip, and keep polling while a render is queued or running.
   useEffect(() => {
@@ -121,6 +134,9 @@ export default function ClipStudioPage() {
     if (JSON.stringify(original) !== JSON.stringify(draft.captions)) body.captions = draft.captions;
     if (draft.framing !== clip.framing_mode) body.framing_mode = draft.framing;
     if (draft.smartTrim !== clip.smart_trim) body.smart_trim = draft.smartTrim;
+    if (draft.style !== normStyle(clip.style ?? "auto")) body.style = draft.style;
+    if (draft.intensity !== (clip.intensity ?? "balanced")) body.intensity = draft.intensity;
+    if (draft.quality !== (clip.quality ?? "high")) body.quality = draft.quality;
     const edits = Object.entries(draft.pages)
       .map(([index, text]) => ({ index: Number(index), text }))
       .filter((e) => (clip.pages?.[e.index]?.text ?? "") !== e.text);
@@ -208,7 +224,8 @@ export default function ClipStudioPage() {
             <div className="mt-4 flex items-end justify-between">
               <div>
                 <p className="text-sm text-muted">
-                  Clip {clip.rank}, version {clip.version}
+                  Clip {clip.rank}
+                  {clip.variant ? ` · ${clip.variant.label}` : ""}, version {clip.version}
                 </p>
                 <ScoreNumber clip={clip} size="md" />
               </div>
@@ -261,6 +278,51 @@ export default function ClipStudioPage() {
               </div>
             </section>
 
+            <section aria-labelledby="style-h" className="space-y-6 border-t border-line pt-10">
+              <h2 id="style-h" className="text-2xl font-semibold">
+                Video style
+              </h2>
+              {clip.applied_style && (
+                <p className="text-sm text-muted">
+                  This version: <span className="text-fg">{clip.applied_style.label}</span> ({clip.applied_style.reason}).
+                </p>
+              )}
+              {clip.recommendation && (
+                <div className="rounded-xl border border-line bg-panel p-4 text-sm">
+                  <p>
+                    Recommended for this clip: <span className="font-medium text-amber">{clip.recommendation.label}</span>, {clip.recommendation.intensity} intensity
+                  </p>
+                  <p className="mt-1 text-[13px] text-faint">Why: {clip.recommendation.reasons.join("; ")}. A recommendation from measured signals, not a promise of views.</p>
+                  {(draft.style !== clip.recommendation.style || draft.intensity !== clip.recommendation.intensity) && (
+                    <Button size="sm" className="mt-3" onClick={() => setDraft((d) => (d && clip.recommendation ? { ...d, style: clip.recommendation.style, intensity: clip.recommendation.intensity } : d))}>
+                      Use the recommendation
+                    </Button>
+                  )}
+                </div>
+              )}
+              <VideoStylePicker value={draft.style} onChange={(v) => setD("style", v)} styles={config?.video_styles} />
+              <Segmented
+                label="Editing intensity"
+                value={draft.intensity}
+                onChange={(v) => setD("intensity", v)}
+                options={[
+                  { value: "subtle", label: "Subtle" },
+                  { value: "balanced", label: "Balanced" },
+                  { value: "high", label: "High energy" },
+                ]}
+              />
+              <Segmented
+                label="Export quality"
+                value={draft.quality}
+                onChange={(v) => setD("quality", v)}
+                options={[
+                  { value: "high", label: "High quality" },
+                  { value: "max", label: "Maximum quality" },
+                ]}
+              />
+              <p className="text-[13px] text-faint">Changing only the captions or the style reuses this clip’s alignment, face tracking and loudness measurement, so the re-render is quicker.</p>
+            </section>
+
             <section aria-labelledby="framing-h" className="space-y-4 border-t border-line pt-10">
               <h2 id="framing-h" className="text-2xl font-semibold">
                 Framing
@@ -272,6 +334,7 @@ export default function ClipStudioPage() {
                 options={[
                   { value: "auto", label: "Automatic" },
                   { value: "face", label: "Follow the speaker" },
+                  { value: "speaker", label: "Speaker focus" },
                   { value: "split", label: "Split screen" },
                   { value: "blur", label: "Blurred backdrop" },
                   { value: "center", label: "Centre crop" },
@@ -295,7 +358,14 @@ export default function ClipStudioPage() {
                   <div className="max-w-xl border-y border-line">
                     <Toggle label="Burn captions into the video" hint="Off keeps the picture clean. The SRT file is available either way." checked={draft.captions.enabled} onChange={(v) => setD("captions", { ...draft.captions, enabled: v })} />
                   </div>
-                  {draft.captions.enabled && <CaptionControls value={draft.captions} onChange={(c) => setD("captions", c)} />}
+                  {draft.captions.enabled && (
+                    <CaptionControls
+                      value={draft.captions}
+                      onChange={(c) => setD("captions", c)}
+                      fonts={config?.caption_fonts}
+                      preview={{ jobId: id, clipId, language: clip.language, autoStyle: config?.video_styles?.find((v) => v.key === (clip.applied_style?.style ?? draft.style))?.caption }}
+                    />
+                  )}
 
                   <div>
                     <h3 className="text-lg font-semibold">Fix the words</h3>

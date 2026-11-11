@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
+from ..resources import active_plan, lower_priority
 from ..security import FAMILY_DEMUXER
 
 ProgressFn = Callable[[float], None]
@@ -30,14 +31,20 @@ def require_binaries() -> None:
 
 
 def input_args(
-    path: Path | str, family: str | None, *, seek: float | None = None, duration: float | None = None
+    path: Path | str,
+    family: str | None,
+    *,
+    seek: float | None = None,
+    duration: float | None = None,
+    threads: int | None = None,
 ) -> list[str]:
     """Arguments that open an untrusted upload.
 
     The protocol whitelist stops crafted files from making ffmpeg read other local files or
     reach the network, and forcing the demuxer stops playlist/script formats from being probed.
+    The decoder gets the active profile's thread budget instead of one thread per core.
     """
-    args = ["-protocol_whitelist", "file,pipe"]
+    args = ["-protocol_whitelist", "file,pipe", "-threads", str(threads or active_plan().threads)]
     if family in FAMILY_DEMUXER:
         args += ["-f", FAMILY_DEMUXER[family]]
     if seek is not None:
@@ -79,6 +86,7 @@ def run_ffmpeg(
         *args,
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    lower_priority(proc.pid)
     err: list[bytes] = []
     t = threading.Thread(target=_drain, args=(proc.stderr, err), daemon=True)
     t.start()
@@ -126,6 +134,7 @@ def read_pipe(
     """
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", *args, "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    lower_priority(proc.pid)
     err: list[bytes] = []
     t = threading.Thread(target=_drain, args=(proc.stderr, err), daemon=True)
     t.start()
@@ -152,5 +161,16 @@ def read_pipe(
         raise FFmpegError("ffmpeg failed: " + " | ".join(tail))
 
 
-def run_capture(cmd: Sequence[str], timeout: float = 120) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(list(cmd), capture_output=True, timeout=timeout, check=False)
+def run_capture(
+    cmd: Sequence[str], timeout: float = 120, cwd: Path | None = None
+) -> subprocess.CompletedProcess[bytes]:
+    """Run to completion and capture output; the child is killed on timeout (never left running)."""
+    proc = subprocess.Popen(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    lower_priority(proc.pid)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        proc.kill()
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(list(cmd), proc.returncode, out, err)

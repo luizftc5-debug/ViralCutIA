@@ -7,17 +7,16 @@ import { useState } from "react";
 import { CaptionControls } from "@/components/caption-controls";
 import { SiteHeader } from "@/components/site-header";
 import { TimelineDropzone } from "@/components/timeline-dropzone";
+import { VideoStylePicker } from "@/components/video-style-picker";
 import { Button, cx, Notice, ProgressBar, Segmented, Select, Toggle } from "@/components/ui";
 import { useUpload } from "@/components/upload-provider";
 import { api, DEFAULT_OPTIONS, type JobOptions } from "@/lib/api";
 import { fileSize, LANGUAGE_OPTIONS, timecode } from "@/lib/format";
 
-const STYLE_NOTES: Record<JobOptions["style"], string> = {
-  auto: "Balanced pacing: silent pauses longer than 0.7 s are shortened.",
-  dynamic: "Fast pacing: silent pauses longer than 0.45 s are shortened.",
-  editorial: "Unhurried: only pauses longer than a second are shortened.",
-  podcast: "Conversation pacing, with split screen when two people can’t share the frame.",
-  gaming: "No pause trimming, and the full frame is kept over a blurred backdrop so off-centre action stays visible.",
+const INTENSITY_NOTES: Record<JobOptions["intensity"], string> = {
+  subtle: "Keeps more of the original rhythm: longer pauses, fewer and smaller moves.",
+  balanced: "The style as designed.",
+  high: "Tighter cuts and more frequent punch-ins, within limits that keep it watchable.",
 };
 
 export default function NewVideoPage() {
@@ -159,6 +158,12 @@ export default function NewVideoPage() {
                     onChange={(c) => set("captions", c)}
                     fonts={upload.config?.caption_fonts}
                     defaultAccent={upload.config?.caption_styles.find((s) => s.key === options.captions.style)?.accent}
+                    preview={{
+                      platform: options.platform,
+                      jobId: upload.phase === "ready" ? upload.job?.id : undefined,
+                      language: options.language === "auto" ? undefined : options.language,
+                      autoStyle: upload.config?.video_styles?.find((v) => v.key === options.style)?.caption,
+                    }}
                   />
                 </div>
               ) : (
@@ -209,17 +214,29 @@ export default function NewVideoPage() {
                 )}
                 <p className="mt-2 text-[13px] text-faint">This is a ceiling. You get fewer clips when fewer moments reach the minimum score.</p>
               </div>
-              <Segmented
-                label="Length"
-                value={options.duration}
-                onChange={(v) => set("duration", v)}
-                options={[
-                  { value: "auto", label: "Automatic" },
-                  { value: "15-30", label: "15–30 s" },
-                  { value: "30-60", label: "30–60 s" },
-                  { value: "60-90", label: "60–90 s" },
-                ]}
-              />
+              <div>
+                <Segmented
+                  label="Length"
+                  value={options.duration}
+                  onChange={(v) => set("duration", v)}
+                  options={[
+                    { value: "auto", label: "Automatic" },
+                    { value: "15-30", label: "15–30 s" },
+                    { value: "30-60", label: "30–60 s" },
+                    { value: "60-90", label: "60–90 s" },
+                    { value: "custom", label: "Custom" },
+                  ]}
+                />
+                {options.duration === "custom" && (
+                  <div className="mt-3 flex items-center gap-3 text-sm text-muted">
+                    From
+                    <input type="number" min={5} max={175} value={options.custom_min} onChange={(e) => set("custom_min", Math.max(5, Math.min(175, Number(e.target.value) || 5)))} className="tnum h-10 w-20 rounded-lg border border-line bg-panel px-3 text-fg" aria-label="Minimum length in seconds" />
+                    to
+                    <input type="number" min={10} max={180} value={options.custom_max} onChange={(e) => set("custom_max", Math.max(10, Math.min(180, Number(e.target.value) || 10)))} className="tnum h-10 w-20 rounded-lg border border-line bg-panel px-3 text-fg" aria-label="Maximum length in seconds" />
+                    seconds
+                  </div>
+                )}
+              </div>
               <Segmented
                 label="Platform"
                 value={options.platform}
@@ -232,21 +249,65 @@ export default function NewVideoPage() {
                 ]}
               />
               <p className="-mt-3 text-[13px] text-faint">Sets how far captions stay from each app’s buttons and text. Universal clears all three.</p>
+              <VideoStylePicker
+                value={options.style}
+                styles={upload.config?.video_styles}
+                onChange={(v) => {
+                  set("style", v);
+                  // a video style comes with its caption design; the user can still change it below
+                  if (options.captions.enabled && options.captions.style !== "auto") {
+                    const cap = upload.config?.video_styles?.find((x) => x.key === v)?.caption;
+                    if (cap && cap !== "auto") set("captions", { ...options.captions, style: cap });
+                  }
+                }}
+              />
               <div>
                 <Segmented
-                  label="Editing style"
-                  value={options.style}
-                  onChange={(v) => set("style", v)}
+                  label="Editing intensity"
+                  value={options.intensity}
+                  onChange={(v) => set("intensity", v)}
                   options={[
-                    { value: "auto", label: "Automatic" },
-                    { value: "dynamic", label: "Dynamic" },
-                    { value: "editorial", label: "Editorial" },
-                    { value: "podcast", label: "Podcast" },
-                    { value: "gaming", label: "Gaming" },
+                    { value: "subtle", label: "Subtle" },
+                    { value: "balanced", label: "Balanced" },
+                    { value: "high", label: "High energy" },
                   ]}
                 />
-                <p className="mt-2 text-[13px] text-faint">{STYLE_NOTES[options.style]}</p>
+                <p className="mt-2 text-[13px] text-faint">{INTENSITY_NOTES[options.intensity]}</p>
               </div>
+              <Segmented
+                label="Visual format"
+                value={options.framing}
+                onChange={(v) => set("framing", v)}
+                options={[
+                  { value: "auto", label: "Smart auto" },
+                  { value: "face", label: "Full-screen vertical" },
+                  { value: "speaker", label: "Speaker focus" },
+                  { value: "split", label: "Split-screen" },
+                  { value: "blur", label: "Blurred background" },
+                ]}
+              />
+              <div>
+                <Segmented
+                  label="Versions per clip"
+                  value={String(options.variations)}
+                  onChange={(v) => set("variations", Number(v))}
+                  options={[
+                    { value: "1", label: "1" },
+                    { value: "2", label: "2" },
+                    { value: "3", label: "3" },
+                  ]}
+                />
+                <p className="mt-2 text-[13px] text-faint">Extra versions reuse the same analysis: a hook-first cut when a stronger opening exists, another style, or another pacing.</p>
+              </div>
+              <Segmented
+                label="Export quality"
+                value={options.quality}
+                onChange={(v) => set("quality", v)}
+                options={[
+                  { value: "high", label: "High quality" },
+                  { value: "max", label: "Maximum quality" },
+                ]}
+              />
               <p className="text-sm text-muted">Format: vertical 9:16.</p>
             </section>
 
@@ -285,18 +346,25 @@ export default function NewVideoPage() {
                   />
                   <span className="mt-1 block text-[13px] text-faint">Comma separated. The speech recogniser prefers these spellings.</span>
                 </label>
-                <Segmented
-                  label="Framing"
-                  value={options.framing}
-                  onChange={(v) => set("framing", v)}
-                  options={[
-                    { value: "auto", label: "Automatic" },
-                    { value: "face", label: "Follow the speaker" },
-                    { value: "split", label: "Split screen" },
-                    { value: "blur", label: "Blurred backdrop" },
-                    { value: "center", label: "Centre crop" },
-                  ]}
-                />
+                <div>
+                  <Segmented
+                    label="Processing mode"
+                    value={options.performance}
+                    onChange={(v) => set("performance", v)}
+                    options={[
+                      { value: "auto", label: `Recommended${upload.config?.performance ? ` (${upload.config.performance.recommended})` : ""}` },
+                      { value: "eco", label: "Eco" },
+                      { value: "balanced", label: "Balanced" },
+                      { value: "turbo", label: "Turbo" },
+                    ]}
+                  />
+                  <p className="mt-2 text-[13px] text-faint">
+                    {upload.config?.performance
+                      ? `Processing server: ${upload.config.performance.hardware.logical_cpus} CPU threads, ${upload.config.performance.hardware.ram_gb ?? "?"} GB RAM${upload.config.performance.hardware.gpu?.name ? `, ${upload.config.performance.hardware.gpu.name}` : ""}. ${upload.config.performance.reason}. `
+                      : ""}
+                    Eco uses half the CPU at low priority; Turbo uses all of it. Output quality is the same in every mode.
+                  </p>
+                </div>
               </div>
             </details>
 

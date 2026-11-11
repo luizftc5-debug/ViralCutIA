@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import get_settings
+from ..resources import active_plan
 from .audio import AudioSignals
 from .transcribe import Word
 
@@ -92,7 +93,10 @@ class Aligner:
         import onnxruntime as ort
 
         so = ort.SessionOptions()
-        so.intra_op_num_threads = max(1, min(4, (get_settings().ffmpeg_threads or 4)))
+        so.intra_op_num_threads = active_plan().onnx_threads
+        so.inter_op_num_threads = 1
+        # windows have different lengths: an arena would keep the largest allocation forever
+        so.enable_cpu_mem_arena = False
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         self.session = ort.InferenceSession(str(onnx_path), so, providers=["CPUExecutionProvider"])
         self.spec = spec

@@ -61,12 +61,19 @@ class Settings(BaseSettings):
 
     # --- rendering
     x264_crf: int = 18
-    x264_preset: str = "medium"
+    x264_preset: str = ""  # empty = chosen by the performance profile (see resources.py)
     audio_bitrate: str = "192k"
     normalize_audio: bool = True
     max_fps: float = 60.0
-    ffmpeg_threads: int = 0  # 0 = let ffmpeg decide
+    ffmpeg_threads: int = 0  # 0 = chosen by the performance profile
+    render_workers: int = 0  # clips rendered at the same time; 0 = chosen by the performance profile
+    hw_encoder: str = "off"  # off | auto | nvenc | qsv | videotoolbox (experimental, see docs/PERFORMANCE.md)
     ffmpeg_timeout_s: int = 3600
+
+    # --- resources
+    performance_profile: str = "auto"  # auto | eco | balanced | turbo (auto = recommended for this machine)
+    cache_dir_name: str = "cache"  # content-addressed cache of transcripts / analysis inside data_dir
+    cache_max_mb: int = 512  # cache size cap; oldest entries go first (entries also expire with retention)
 
     # --- worker
     worker_poll_interval_s: float = 1.0
@@ -82,6 +89,10 @@ class Settings(BaseSettings):
     @property
     def jobs_dir(self) -> Path:
         return self.data_dir / "jobs"
+
+    @property
+    def cache_dir(self) -> Path:
+        return self.data_dir / self.cache_dir_name
 
     @property
     def fonts_dir(self) -> Path:

@@ -45,8 +45,18 @@ export function ClipRow({ clip, jobId }: { clip: Clip; jobId: string }) {
       <div className="min-w-0">
         <div className="flex flex-wrap items-start justify-between gap-x-8 gap-y-4">
           <div>
-            <p className="text-sm text-muted">Clip {clip.rank}</p>
+            <p className="text-sm text-muted">
+              Clip {clip.rank}
+              {clip.variant && <span className="ml-2 rounded-md border border-line px-1.5 py-0.5 text-[12px] text-fg">Version {clip.variant.index}: {clip.variant.label}</span>}
+            </p>
             <ScoreNumber clip={clip} />
+            {clip.applied_style && <p className="mt-1 text-[13px] text-faint">Style: {clip.applied_style.label}</p>}
+            {clip.variant && <p className="mt-1 text-[13px] text-faint">{clip.variant.why}</p>}
+            {clip.recommendation && clip.applied_style && clip.recommendation.style !== clip.applied_style.style && (
+              <p className="mt-1 text-[13px] text-faint">
+                Suggested: {clip.recommendation.label} ({clip.recommendation.reasons[0]}). Open Edit to try it.
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             {clip.urls && (

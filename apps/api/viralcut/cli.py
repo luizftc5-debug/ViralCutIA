@@ -32,14 +32,49 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--style",
         default="high_retention",
-        choices=["viral_dynamic", "high_retention", "clean_editorial", "dynamic_creator", "gaming"],
+        choices=[
+            "auto",
+            "viral_dynamic",
+            "energy",
+            "podcast",
+            "kinetic",
+            "clean_editorial",
+            "gaming",
+            "cinematic",
+            "high_retention",
+            "dynamic_creator",
+        ],
+        help="caption style (auto = the caption design of the video style)",
     )
     p.add_argument(
-        "--edit-style", default="auto", choices=["dynamic", "editorial", "podcast", "gaming", "auto"]
+        "--edit-style",
+        "--video-style",
+        dest="edit_style",
+        default="auto",
+        choices=[
+            "auto",
+            "viral",
+            "podcast",
+            "gaming",
+            "cinematic",
+            "educational",
+            "reaction",
+            "minimal",
+            "storytime",
+            "news",
+            "dynamic",
+            "editorial",
+        ],
     )
+    p.add_argument("--intensity", default="balanced", choices=["subtle", "balanced", "high"])
+    p.add_argument("--variations", type=int, default=1, choices=[1, 2, 3])
+    p.add_argument("--quality", default="high", choices=["high", "max"])
+    p.add_argument("--performance", default="auto", choices=["auto", "eco", "balanced", "turbo"])
     p.add_argument("--platform", default="universal", choices=["shorts", "reels", "tiktok", "universal"])
     p.add_argument("--language", default="auto")
-    p.add_argument("--framing", default="auto", choices=["auto", "face", "split", "blur", "center"])
+    p.add_argument(
+        "--framing", default="auto", choices=["auto", "face", "speaker", "split", "blur", "center"]
+    )
     p.add_argument("--min-score", type=float, default=None)
     p.add_argument("--no-zoom", action="store_true", help="disable the eased punch-ins on stressed words")
     p.add_argument("--glossary", default="", help="comma-separated names/terms the recogniser should prefer")
@@ -72,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
         min_score=args.min_score,
         smart_zoom=not args.no_zoom,
         glossary=args.glossary,
+        intensity=args.intensity,
+        variations=args.variations,
+        quality=args.quality,
+        performance=args.performance,
     )
     with session_scope() as s:
         job = Job(
@@ -113,6 +152,11 @@ def main(argv: list[str] | None = None) -> int:
                     "titles": c.titles,
                     "layouts": (c.framing or {}).get("layouts"),
                     "qa_passed": (c.qa or {}).get("passed"),
+                    "variant": (c.edit or {}).get("variant"),
+                    "style": ((c.framing or {}).get("edit") or {}).get("style"),
+                    "recommendation": (c.edit or {}).get("recommendation"),
+                    "notes": ((c.framing or {}).get("edit") or {}).get("notes"),
+                    "audio": ((c.framing or {}).get("edit") or {}).get("audio"),
                     "file": str(storage.clip_file(job_id, c.id, c.version, "video")),
                 }
                 for c in job.clips
@@ -123,11 +167,11 @@ def main(argv: list[str] | None = None) -> int:
         args.out.mkdir(parents=True, exist_ok=True)
         for rank, cid, version in clips:
             shutil.copyfile(
-                storage.clip_file(job_id, cid, version, "video"), args.out / f"clip-{rank:02d}.mp4"
+                storage.clip_file(job_id, cid, version, "video"), args.out / f"clip-{rank:02d}-{cid[:6]}.mp4"
             )
             srt = storage.clip_file(job_id, cid, version, "srt")
             if srt.exists():
-                shutil.copyfile(srt, args.out / f"clip-{rank:02d}.srt")
+                shutil.copyfile(srt, args.out / f"clip-{rank:02d}-{cid[:6]}.srt")
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result["status"] == "completed" else 1
 

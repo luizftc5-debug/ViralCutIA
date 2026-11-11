@@ -28,6 +28,7 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 from ..config import get_settings
+from ..resources import active_plan, detect_hardware
 from .audio import SAMPLE_RATE, AudioSignals, analyze_audio, enhance_for_asr
 from .ffmpeg import CancelFn, Cancelled, ProgressFn
 
@@ -115,7 +116,13 @@ def _resolve_device() -> tuple[str, str]:
             device = "cpu"
     compute = s.whisper_compute_type
     if compute == "auto":
-        compute = "float16" if device == "cuda" else "int8"
+        if device == "cuda":
+            # FP16 weights of large-v3 need ~3.5 GB of VRAM at inference; on a small card INT8
+            # weights with FP16 compute fit in about half with a negligible accuracy cost
+            free = detect_hardware().gpu.get("vram_free_gb")
+            compute = "int8_float16" if free is not None and free < 5.0 else "float16"
+        else:
+            compute = "int8"
     return device, compute
 
 
@@ -181,6 +188,8 @@ def load_model(name: str | None = None):
                 return _models[candidate], candidate
             try:
                 kwargs = {"device": device, "compute_type": compute}
+                if device == "cpu":
+                    kwargs["cpu_threads"] = active_plan().asr_threads
                 if s.models_dir:
                     kwargs["download_root"] = str(s.models_dir)
                 model = WhisperModel(candidate, **kwargs)
@@ -192,6 +201,28 @@ def load_model(name: str | None = None):
                 last = exc
                 log.warning("could not load Whisper model %r: %s", candidate, exc)
     raise TranscriptionUnavailable(f"no Whisper model could be loaded ({last})")
+
+
+def release_models() -> None:
+    """Drop cached Whisper models (ECO profile: memory goes back to the system between jobs)."""
+    import gc
+
+    with _model_lock:
+        _models.clear()
+    gc.collect()
+
+
+def cache_key(digest: str, language: str | None, glossary: str = "") -> str:
+    """Everything that changes a transcript of the same audio bytes, for the content-addressed cache."""
+    from ..cache import make_key
+
+    s = get_settings()
+    plan = plan_asr()
+    terms = sorted({g.strip().lower() for g in f"{s.glossary},{glossary}".split(",") if g.strip()})
+    return make_key(
+        "asr-v1", digest, language or "auto", plan.model, plan.beam_size, plan.vad, plan.device,
+        s.whisper_vad_min_silence_ms, s.whisper_vad_speech_pad_ms, s.whisper_prompt, s.asr_enhance, terms,
+    )  # fmt: skip
 
 
 # --------------------------------------------------------------------------- evidence filter

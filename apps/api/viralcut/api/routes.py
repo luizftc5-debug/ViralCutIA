@@ -22,11 +22,13 @@ from .. import __version__
 from ..config import get_settings
 from ..db import Clip, ClipMetric, Job, JobLog, session_scope, utcnow
 from ..jobs import enqueue
-from ..options import SAFE_AREAS, CaptionOptions, JobOptions
+from ..options import SAFE_AREAS, CaptionOptions, JobOptions, VideoStyleKey
 from ..pipeline import captions as cap
 from ..pipeline.orchestrator import Artifacts, effective_words
 from ..pipeline.probe import MediaInfo, ProbeError, probe
+from ..pipeline.styles import STYLES as VIDEO_STYLES
 from ..pipeline.transcribe import plan_asr
+from ..resources import PROFILES, detect_hardware, plan_for
 from ..security import UploadRejected, is_valid_id, safe_stem, sanitize_filename, validate_extension_and_magic
 from ..storage import get_storage
 from .serializers import clip_out, job_out
@@ -100,6 +102,27 @@ def config() -> dict[str, Any]:
             }
             for k, v in cap.STYLES.items()
         ],
+        "video_styles": [
+            {
+                "key": "auto",
+                "label": "Automatic AI",
+                "description": "Analyses each clip and picks the style its content calls for.",
+                "caption": "auto",
+                "framing": "auto",
+                "best_for": [],
+            }
+        ]
+        + [
+            {
+                "key": k,
+                "label": v.label,
+                "description": v.description,
+                "caption": v.caption,
+                "framing": v.framing,
+                "best_for": v.best_for,
+            }
+            for k, v in VIDEO_STYLES.items()
+        ],
         "caption_fonts": [
             {"key": "auto", "label": "Style default"},
             {"key": "inter", "label": "Inter"},
@@ -108,6 +131,23 @@ def config() -> dict[str, Any]:
             {"key": "dm_serif", "label": "DM Serif Display"},
         ],
         "platforms": list(SAFE_AREAS),
+        # hardware of the machine that runs the jobs (the server's worker, not the browser)
+        "performance": {
+            "profiles": [
+                {
+                    "key": k,
+                    **{
+                        f: getattr(plan_for(k), f)
+                        for f in ("threads", "render_workers", "nice", "keep_asr_model")
+                    },
+                }
+                for k in PROFILES
+            ],
+            "default": plan_for().profile,
+            "recommended": plan_for().recommended,
+            "reason": plan_for().reason,
+            "hardware": detect_hardware().to_dict(),
+        },
         "engine": {
             "transcription": f"faster-whisper:{plan_asr().model}",
             "transcription_mode": plan_asr().mode,
@@ -402,12 +442,61 @@ class PageEdit(BaseModel):
     text: str = Field(max_length=400)
 
 
+class CaptionPreviewRequest(BaseModel):
+    captions: CaptionOptions = Field(default_factory=CaptionOptions)
+    platform: Literal["shorts", "reels", "tiktok", "universal"] = "universal"
+    text: str = Field(default="", max_length=300)
+    language: str = Field(default="en", max_length=8)
+    job_id: str | None = None  # use a frame of this job's video as the background
+    clip_id: str | None = None
+
+
+@router.post("/caption-preview")
+def caption_preview(body: CaptionPreviewRequest) -> Response:
+    """A JPEG of the captions exactly as the export will burn them (same layout code, same libass)."""
+    from ..pipeline.preview import PreviewBusy, render_preview
+
+    background = None
+    keywords: set[str] | None = None
+    text = body.text
+    language = body.language
+    if body.job_id:
+        with session_scope() as s:
+            job = _get_job(s, body.job_id)
+            media = job.media or {}
+            t = 1.0
+            if body.clip_id:
+                clip = _get_clip(s, body.job_id, body.clip_id)
+                t = clip.start + 1.0
+                language = clip.language or language
+                if not text and clip.pages:
+                    text = " ".join(p["text"] for p in clip.pages[:2])
+            src = get_storage().source_path(body.job_id, job.source_ext)
+            if src.exists() and media.get("width") and media.get("height"):
+                from ..security import sniff_container
+
+                with src.open("rb") as fh:
+                    family = sniff_container(fh.read(64))
+                background = (src, family, t, int(media["width"]), int(media["height"]))
+    try:
+        jpg = render_preview(body.captions, body.platform, text, language, background, keywords)
+    except PreviewBusy:
+        raise HTTPException(429, "Previews are busy, try again in a moment.") from None
+    except Exception as exc:
+        log.warning("caption preview failed: %s", exc)
+        raise HTTPException(500, "The preview could not be rendered.") from None
+    return Response(content=jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 class ClipUpdate(BaseModel):
     start: float | None = Field(default=None, ge=0)
     end: float | None = Field(default=None, gt=0)
     captions: CaptionOptions | None = None
-    framing_mode: Literal["auto", "face", "split", "blur", "center"] | None = None
+    framing_mode: Literal["auto", "face", "speaker", "split", "blur", "center"] | None = None
     smart_trim: bool | None = None
+    style: VideoStyleKey | None = None
+    intensity: Literal["subtle", "balanced", "high"] | None = None
+    quality: Literal["high", "max"] | None = None
     page_edits: list[PageEdit] | None = Field(default=None, max_length=500)
 
 
@@ -467,6 +556,12 @@ def update_clip(job_id: str, clip_id: str, body: ClipUpdate) -> dict[str, Any]:
             clip.framing_mode = body.framing_mode
         if body.smart_trim is not None:
             clip.smart_trim = body.smart_trim
+        edit = dict(clip.edit or {})
+        for key in ("style", "intensity", "quality"):
+            value = getattr(body, key)
+            if value is not None:
+                edit[key] = value
+        clip.edit = edit
         clip.status = "queued"
         clip.progress = 0.0
         clip.error = ""
