@@ -28,6 +28,7 @@ No system can guarantee virality, and this one does not claim to: see
 | QA | Codec, resolution, orientation, frame rate, duration, A/V sync, faststart, full decode, non-silent audio, **integrated loudness, true peak, 48 kHz stereo and square pixels** verified for every file with ffprobe/ffmpeg |
 | Studio | Preview (the rendered MP4, so preview and export are identical), score breakdown, move start/end, fix caption text, change caption style and framing, re-render, download MP4/SRT, export all as ZIP. **Optional transcript review before rendering**: pause after the clips are chosen, correct words everywhere (find and replace), continue |
 | Jobs | Persistent queue with real per-stage progress and timings, logs, cancel, controlled retry, crash recovery, automatic deletion after the retention period |
+| Creator Studio | 13 editors (/corte, /tomada, /ganchos, /legenda, /lettering, /animacao, /3d, /trilha, /tela-verde, /prova, /texto-atras, /referencia, /enquadramento), 12 presets, one-click generation, YouTube long-form 16:9 with chapters, ranking compilations, Growth Toolkit, project history. [Details](docs/CREATOR_STUDIO.md) |
 | Performance | **ECO / BALANCED / TURBO** resource profiles detected from the worker's own hardware (cores, cgroup quota, RAM, GPU), thread budgets for ffmpeg / Whisper / aligner, lower process priority, bounded parallel rendering, content-addressed cache of transcripts and analysis, per-clip cache for studio re-renders. [Measured before/after](docs/PERFORMANCE.md) |
 
 ## Quick start

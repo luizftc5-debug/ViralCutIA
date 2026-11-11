@@ -26,6 +26,74 @@ export type VideoStyle =
   | "storytime"
   | "news";
 export type Intensity = "subtle" | "balanced" | "high";
+export type ContentType = "shorts" | "tiktok" | "reels" | "youtube" | "compilation";
+/** Creator Studio: per-editor settings keyed by the editor's command name (corte, 3d, tela-verde…). */
+export type EditorsConfig = Record<string, Record<string, unknown>>;
+
+export interface EditorControl {
+  name: string;
+  type: "number" | "bool" | "select" | "text" | "color" | "asset" | "proofs";
+  label: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+  kind?: "music" | "image" | "reference";
+  auto?: string;
+}
+
+export interface EditorInfo {
+  key: string;
+  command: string;
+  label: string;
+  description: string;
+  heavy: boolean;
+  controls: EditorControl[];
+}
+
+export interface PresetInfo {
+  key: string;
+  label: string;
+  description: string;
+  options: Partial<JobOptions> & { captions?: Partial<CaptionOptions> };
+  editors: EditorsConfig;
+}
+
+export interface Asset {
+  id: string;
+  kind: "music" | "image" | "reference";
+  name: string;
+  size: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+}
+
+export interface Growth {
+  titles: string[];
+  description: string;
+  keywords: string[];
+  hook: string;
+  thumbnail_text: string[];
+  category: string;
+  hashtags: string[];
+  platforms: Record<string, string>;
+  followups: string[];
+  versions_to_test: string[];
+  chapters?: { t: number; title: string }[];
+  note: string;
+}
+
+export interface JobSummary {
+  id: string;
+  status: Job["status"];
+  filename: string;
+  created_at: string;
+  media: Job["media"];
+  options: Partial<JobOptions>;
+  clip_count: number;
+  thumbnail: string | null;
+}
 
 export interface CaptionOptions {
   enabled: boolean;
@@ -60,13 +128,17 @@ export interface JobOptions {
   duration: "auto" | "15-30" | "30-60" | "60-90" | "custom";
   custom_min: number;
   custom_max: number;
-  platform: "universal" | "shorts" | "reels" | "tiktok";
-  aspect: "9:16";
+  platform: "universal" | "shorts" | "reels" | "tiktok" | "youtube";
+  aspect: "9:16" | "16:9";
   style: VideoStyle;
   intensity: Intensity;
   variations: number;
   quality: "high" | "max";
   performance: "auto" | "eco" | "balanced" | "turbo";
+  content_type: ContentType;
+  preset: string;
+  editors: EditorsConfig;
+  growth: boolean;
   framing: FramingMode;
   smart_zoom: boolean;
   review_transcript: boolean;
@@ -137,6 +209,11 @@ export interface Clip {
   applied_style: { style: VideoStyle; label: string; chosen_by: "user" | "auto"; reason: string; intensity: Intensity } | null;
   variant: { index: number; kind: string; label: string; why: string; of: string } | null;
   recommendation: StyleRecommendation | null;
+  kind: "clip" | "compilation";
+  aspect: "9:16" | "16:9";
+  growth: Growth | null;
+  hook_first: { score: number; from: number; text: string; skipped_s: number } | null;
+  editors: EditorsConfig;
   layouts: string[];
   framing_notes: string[];
   has_captions_burned: boolean;
@@ -211,6 +288,9 @@ export interface PerformanceInfo {
 export interface AppConfig {
   limits: { max_upload_mb: number; max_duration_s: number; formats: string[]; retention_hours: number };
   caption_styles: { key: CaptionStyle; label: string; description: string; accent: string }[];
+  editors: EditorInfo[];
+  presets: PresetInfo[];
+  content_types: ContentType[];
   video_styles: { key: VideoStyle; label: string; description: string; caption: CaptionStyle; framing: FramingMode; best_for: string[] }[];
   performance: PerformanceInfo;
   caption_fonts: { key: CaptionOptions["font"]; label: string }[];
@@ -266,6 +346,22 @@ export const api = {
   resume: (id: string) => request<Job>(`/api/jobs/${id}/resume`, { method: "POST" }),
   updateClip: (jobId: string, clipId: string, body: ClipUpdate) =>
     request<Clip>(`/api/jobs/${jobId}/clips/${clipId}`, { method: "PATCH", ...json(body) }),
+  jobs: () => request<{ jobs: JobSummary[] }>("/api/jobs"),
+  assets: (jobId: string) => request<{ assets: Asset[] }>(`/api/jobs/${jobId}/assets`),
+  uploadAsset: async (jobId: string, kind: Asset["kind"], file: File): Promise<Asset> => {
+    const res = await fetch(`${API_URL}/api/jobs/${jobId}/assets?kind=${kind}&filename=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+    if (!res.ok) {
+      let detail = `Upload failed (${res.status}).`;
+      try {
+        const b = (await res.json()) as { detail?: unknown };
+        if (typeof b.detail === "string") detail = b.detail;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(detail, res.status);
+    }
+    return (await res.json()) as Asset;
+  },
   /** JPEG rendered by the export engine itself (same layout code, same libass). */
   captionPreview: async (body: CaptionPreviewRequest, signal?: AbortSignal): Promise<Blob> => {
     const res = await fetch(`${API_URL}/api/caption-preview`, { method: "POST", signal, ...json(body) });
@@ -313,6 +409,7 @@ export interface ClipUpdate {
   style?: VideoStyle;
   intensity?: Intensity;
   quality?: "high" | "max";
+  editors?: EditorsConfig;
   page_edits?: { index: number; text: string }[];
 }
 
@@ -376,6 +473,10 @@ export const DEFAULT_OPTIONS: JobOptions = {
   variations: 1,
   quality: "high",
   performance: "auto",
+  content_type: "shorts",
+  preset: "",
+  editors: {},
+  growth: true,
   framing: "auto",
   smart_zoom: true,
   review_transcript: false,

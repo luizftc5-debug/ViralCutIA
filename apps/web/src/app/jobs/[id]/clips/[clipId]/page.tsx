@@ -9,8 +9,20 @@ import { CaptionControls } from "@/components/caption-controls";
 import { ScoreNumber } from "@/components/score";
 import { SiteHeader } from "@/components/site-header";
 import { Button, buttonClass, Notice, ProgressBar, Segmented, Toggle } from "@/components/ui";
+import dynamic from "next/dynamic";
+
 import { VideoStylePicker } from "@/components/video-style-picker";
-import { api, ApiError, type AppConfig, type CaptionOptions, type Clip, type ClipUpdate, DEFAULT_CAPTIONS, type FramingMode, type Intensity, mediaUrl, type VideoStyle } from "@/lib/api";
+import { api, ApiError, type AppConfig, type CaptionOptions, type Clip, type ClipUpdate, DEFAULT_CAPTIONS, type EditorsConfig, type FramingMode, type Intensity, mediaUrl, type VideoStyle } from "@/lib/api";
+
+const EditorsPanel = dynamic(() => import("@/components/creator-studio").then((m) => m.EditorsPanel), {
+  loading: () => <p className="text-sm text-faint">Loading editors…</p>,
+});
+
+function mergeEditors(base: EditorsConfig, over: EditorsConfig): EditorsConfig {
+  const out: EditorsConfig = {};
+  for (const k of new Set([...Object.keys(base), ...Object.keys(over)])) out[k] = { ...(base[k] ?? {}), ...(over[k] ?? {}) };
+  return out;
+}
 import { layoutName, timecode } from "@/lib/format";
 
 interface Draft {
@@ -22,12 +34,13 @@ interface Draft {
   style: VideoStyle;
   intensity: Intensity;
   quality: "high" | "max";
+  editors: EditorsConfig;
   pages: Record<number, string>;
 }
 
 const normStyle = (s: Clip["style"]): VideoStyle => (s === "dynamic" ? "viral" : s === "editorial" ? "minimal" : s);
 
-function draftFrom(clip: Clip): Draft {
+function draftFrom(clip: Clip, jobEditors: EditorsConfig = {}): Draft {
   return {
     start: clip.start,
     end: clip.end,
@@ -37,6 +50,7 @@ function draftFrom(clip: Clip): Draft {
     style: normStyle(clip.style ?? "auto"),
     intensity: clip.intensity ?? "balanced",
     quality: clip.quality ?? "high",
+    editors: mergeEditors(jobEditors, clip.editors ?? {}),
     pages: {},
   };
 }
@@ -82,9 +96,18 @@ export default function ClipStudioPage() {
 
   const [nonce, setNonce] = useState(0);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [jobEditors, setJobEditors] = useState<EditorsConfig>({});
+  const jobEditorsRef = useRef<EditorsConfig>({});
   useEffect(() => {
     api.config().then(setConfig).catch(() => undefined);
-  }, []);
+    api
+      .job(id)
+      .then((j) => {
+        jobEditorsRef.current = j.options.editors ?? {};
+        setJobEditors(jobEditorsRef.current);
+      })
+      .catch(() => undefined);
+  }, [id]);
 
   // Load the clip, and keep polling while a render is queued or running.
   useEffect(() => {
@@ -100,7 +123,7 @@ export default function ClipStudioPage() {
         // (re)seed the form whenever a new rendered version arrives; a failed render keeps your edits
         if (!busy && next.version !== loadedVersion.current) {
           loadedVersion.current = next.version;
-          setDraft(draftFrom(next));
+          setDraft(draftFrom(next, jobEditorsRef.current));
         }
         if (busy) timer = setTimeout(tick, 1000);
       } catch (e) {
@@ -137,12 +160,13 @@ export default function ClipStudioPage() {
     if (draft.style !== normStyle(clip.style ?? "auto")) body.style = draft.style;
     if (draft.intensity !== (clip.intensity ?? "balanced")) body.intensity = draft.intensity;
     if (draft.quality !== (clip.quality ?? "high")) body.quality = draft.quality;
+    if (JSON.stringify(draft.editors) !== JSON.stringify(mergeEditors(jobEditors, clip.editors ?? {}))) body.editors = draft.editors;
     const edits = Object.entries(draft.pages)
       .map(([index, text]) => ({ index: Number(index), text }))
       .filter((e) => (clip.pages?.[e.index]?.text ?? "") !== e.text);
     if (edits.length) body.page_edits = edits;
     return Object.keys(body).length ? body : null;
-  }, [clip, draft]);
+  }, [clip, draft, jobEditors]);
 
   const lengthProblem = draft && (draft.end - draft.start < 3 ? "A clip needs to be at least 3 seconds long." : draft.end - draft.start > 180 ? "A clip can be at most 3 minutes long." : "");
 
@@ -206,7 +230,7 @@ export default function ClipStudioPage() {
         <div className="mt-6 grid gap-x-14 gap-y-10 lg:grid-cols-[300px_minmax(0,1fr)]">
           {/* preview: always the last rendered file, so what you see is what you download */}
           <aside className="lg:sticky lg:top-24 lg:self-start">
-            <div className="relative aspect-[9/16] w-full max-w-[300px] overflow-hidden rounded-(--radius-frame) border border-line bg-panel">
+            <div className={`relative ${clip.aspect === "16:9" ? "aspect-video" : "aspect-[9/16]"} w-full max-w-[300px] overflow-hidden rounded-(--radius-frame) border border-line bg-panel`}>
               {clip.urls ? (
                 <video ref={videoRef} key={clip.version} controls playsInline preload="metadata" poster={mediaUrl(clip.urls.thumbnail)} src={mediaUrl(clip.urls.video)} className="size-full object-cover" aria-label="Rendered clip preview" />
               ) : (
@@ -323,6 +347,21 @@ export default function ClipStudioPage() {
               <p className="text-[13px] text-faint">Changing only the captions or the style reuses this clip’s alignment, face tracking and loudness measurement, so the re-render is quicker.</p>
             </section>
 
+            <section aria-labelledby="editors-h" className="space-y-4 border-t border-line pt-10">
+              <h2 id="editors-h" className="text-2xl font-semibold">
+                Editors for this clip
+              </h2>
+              <p className="text-sm text-muted">Changes apply to this clip only. Analysis, alignment and face tracking are reused, so only the render runs again.</p>
+              <EditorsPanel
+                editors={draft.editors}
+                onChange={(e) => setD("editors", e)}
+                info={config?.editors}
+                jobId={id}
+                captionsOn={draft.captions.enabled}
+                onCaptions={(v) => setD("captions", { ...draft.captions, enabled: v })}
+              />
+            </section>
+
             <section aria-labelledby="framing-h" className="space-y-4 border-t border-line pt-10">
               <h2 id="framing-h" className="text-2xl font-semibold">
                 Framing
@@ -402,7 +441,7 @@ export default function ClipStudioPage() {
                 </p>
                 <div className="flex w-full gap-3 sm:w-auto">
                   {changes && !rendering && (
-                    <Button variant="ghost" onClick={() => setDraft(draftFrom(clip))}>
+                    <Button variant="ghost" onClick={() => setDraft(draftFrom(clip, jobEditors))}>
                       Discard
                     </Button>
                   )}

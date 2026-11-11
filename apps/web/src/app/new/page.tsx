@@ -1,13 +1,20 @@
 "use client";
 
 import { FileVideo, RotateCcw, X } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { CaptionControls } from "@/components/caption-controls";
 import { SiteHeader } from "@/components/site-header";
 import { TimelineDropzone } from "@/components/timeline-dropzone";
+import { applyPreset, ContentTypePicker, PresetGrid } from "@/components/creator-studio";
 import { VideoStylePicker } from "@/components/video-style-picker";
+
+// the 13-editor panel is only downloaded when Advanced mode is opened
+const EditorsPanel = dynamic(() => import("@/components/creator-studio").then((m) => m.EditorsPanel), {
+  loading: () => <p className="text-sm text-faint">Loading editors…</p>,
+});
 import { Button, cx, Notice, ProgressBar, Segmented, Select, Toggle } from "@/components/ui";
 import { useUpload } from "@/components/upload-provider";
 import { api, DEFAULT_OPTIONS, type JobOptions } from "@/lib/api";
@@ -26,17 +33,18 @@ export default function NewVideoPage() {
   const [customCount, setCustomCount] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState("");
+  const [mode, setMode] = useState<"basic" | "advanced">("basic");
 
   const set = <K extends keyof JobOptions>(key: K, v: JobOptions[K]) => setOptions((o) => ({ ...o, [key]: v }));
   const minScoreDefault = upload.config?.engine.min_score ?? 60;
 
-  const generate = async () => {
+  const generate = async (override?: JobOptions) => {
     if (!upload.job) return;
     setStarting(true);
     setStartError("");
     try {
       const jobId = upload.job.id;
-      await api.start(jobId, options);
+      await api.start(jobId, override ?? options);
       upload.reset();
       router.push(`/jobs/${jobId}`);
     } catch (e) {
@@ -125,7 +133,82 @@ export default function NewVideoPage() {
               void generate();
             }}
           >
-            <section aria-labelledby="captions-q">
+            <section aria-labelledby="studio-h" className="space-y-8">
+              <div className="flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <h2 id="studio-h" className="text-2xl font-semibold">
+                    Creator Studio
+                  </h2>
+                  <p className="mt-1 text-sm text-muted">One click, a preset, or every editor by hand.</p>
+                </div>
+                <Segmented
+                  label="Interface"
+                  hideLabel
+                  value={mode}
+                  onChange={(v) => setMode(v)}
+                  options={[
+                    { value: "basic", label: "Basic" },
+                    { value: "advanced", label: "Advanced" },
+                  ]}
+                />
+              </div>
+              <ContentTypePicker
+                value={options.content_type}
+                onChange={(v) => setOptions((o) => ({ ...o, content_type: v, aspect: v === "youtube" ? "16:9" : o.aspect, clip_count: v === "compilation" && o.clip_count === "auto" ? 5 : o.clip_count }))}
+              />
+              {options.content_type === "compilation" && (
+                <Segmented
+                  label="Compilation format"
+                  value={options.aspect}
+                  onChange={(v) => set("aspect", v)}
+                  options={[
+                    { value: "9:16", label: "Vertical 9:16" },
+                    { value: "16:9", label: "Horizontal 16:9" },
+                  ]}
+                />
+              )}
+
+              <div className="rounded-xl border border-line bg-panel p-5">
+                <h3 className="text-lg font-semibold">A. Quick generation</h3>
+                <p className="mt-1 text-sm text-muted">The AI analyses the video, chooses the editing strategy per clip and renders publication-ready files.</p>
+                <Button
+                  variant="primary"
+                  className="mt-4"
+                  disabled={upload.phase !== "ready" || starting}
+                  onClick={() => {
+                    const auto = upload.config?.presets?.find((p) => p.key === "auto");
+                    const next = auto ? applyPreset(options, auto) : options;
+                    setOptions(next);
+                    void generate(next);
+                  }}
+                >
+                  Generate automatically
+                </Button>
+              </div>
+
+              <div>
+                <h3 className="text-lg font-semibold">B. Creative presets</h3>
+                <p className="mt-1 mb-3 text-sm text-muted">Each preset sets real pacing, captions, framing and editors. You can still change anything after picking one.</p>
+                {upload.config?.presets ? <PresetGrid presets={upload.config.presets} value={options.preset} onPick={(p) => setOptions((o) => applyPreset(o, p))} /> : <p className="text-sm text-faint">Loading presets…</p>}
+              </div>
+
+              {mode === "advanced" && (
+                <div>
+                  <h3 className="text-lg font-semibold">C. Advanced editors</h3>
+                  <p className="mt-1 mb-3 text-sm text-muted">Thirteen specialised editors. Each switch changes the exported video.</p>
+                  <EditorsPanel
+                    editors={options.editors}
+                    onChange={(e) => set("editors", e)}
+                    info={upload.config?.editors}
+                    jobId={upload.phase === "ready" ? upload.job?.id : undefined}
+                    captionsOn={options.captions.enabled}
+                    onCaptions={(v) => set("captions", { ...options.captions, enabled: v })}
+                  />
+                </div>
+              )}
+            </section>
+
+            <section aria-labelledby="captions-q" className="border-t border-line pt-10">
               <h2 id="captions-q" className="text-2xl font-semibold">
                 Do you want captions on your clips?
               </h2>
@@ -151,7 +234,9 @@ export default function NewVideoPage() {
                 })}
               </div>
 
-              {options.captions.enabled ? (
+              {options.captions.enabled && mode === "basic" ? (
+                <p className="mt-4 text-sm text-faint">Caption design follows the preset. Switch to Advanced for every caption style and Caption Studio.</p>
+              ) : options.captions.enabled ? (
                 <div className="mt-8 space-y-6">
                   <CaptionControls
                     value={options.captions}
@@ -174,6 +259,7 @@ export default function NewVideoPage() {
               </div>
             </section>
 
+            {mode === "advanced" && (
             <section aria-labelledby="clips-h" className="space-y-6 border-t border-line pt-10">
               <h2 id="clips-h" className="text-2xl font-semibold">
                 Clips
@@ -308,9 +394,11 @@ export default function NewVideoPage() {
                   { value: "max", label: "Maximum quality" },
                 ]}
               />
-              <p className="text-sm text-muted">Format: vertical 9:16.</p>
+              <p className="text-sm text-muted">Format: {options.content_type === "youtube" || (options.content_type === "compilation" && options.aspect === "16:9") ? "horizontal 16:9" : "vertical 9:16"}.</p>
             </section>
+            )}
 
+            {mode === "advanced" && (
             <details className="border-t border-line pt-6">
               <summary className="text-sm text-muted hover:text-fg">Advanced</summary>
               <div className="mt-6 space-y-6">
@@ -367,6 +455,7 @@ export default function NewVideoPage() {
                 </div>
               </div>
             </details>
+            )}
 
             {startError && <Notice tone="error">{startError}</Notice>}
 

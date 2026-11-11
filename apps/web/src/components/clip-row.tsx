@@ -6,6 +6,7 @@ import Link from "next/link";
 import { type Clip, mediaUrl } from "@/lib/api";
 import { languageName, layoutName, seconds, timecode } from "@/lib/format";
 
+import { GrowthToolkit } from "./growth-toolkit";
 import { ScoreBreakdown, ScoreNumber } from "./score";
 import { buttonClass, CopyButton, Notice, ProgressBar } from "./ui";
 
@@ -16,7 +17,7 @@ export function ClipRow({ clip, jobId }: { clip: Clip; jobId: string }) {
   return (
     <li className="grid gap-x-8 gap-y-6 py-10 md:grid-cols-[240px_minmax(0,1fr)]" aria-label={`Clip ${clip.rank}`}>
       <div>
-        <div className="relative aspect-[9/16] w-full max-w-[240px] overflow-hidden rounded-(--radius-frame) border border-line bg-panel">
+        <div className={`relative ${clip.aspect === "16:9" ? "aspect-video" : "aspect-[9/16]"} w-full max-w-[240px] overflow-hidden rounded-(--radius-frame) border border-line bg-panel`}>
           {clip.urls ? (
             <video
               key={clip.version}
@@ -46,10 +47,10 @@ export function ClipRow({ clip, jobId }: { clip: Clip; jobId: string }) {
         <div className="flex flex-wrap items-start justify-between gap-x-8 gap-y-4">
           <div>
             <p className="text-sm text-muted">
-              Clip {clip.rank}
+              {clip.kind === "compilation" ? "Ranking compilation" : `Clip ${clip.rank}`}
               {clip.variant && <span className="ml-2 rounded-md border border-line px-1.5 py-0.5 text-[12px] text-fg">Version {clip.variant.index}: {clip.variant.label}</span>}
             </p>
-            <ScoreNumber clip={clip} />
+            {clip.kind !== "compilation" && <ScoreNumber clip={clip} />}
             {clip.applied_style && <p className="mt-1 text-[13px] text-faint">Style: {clip.applied_style.label}</p>}
             {clip.variant && <p className="mt-1 text-[13px] text-faint">{clip.variant.why}</p>}
             {clip.recommendation && clip.applied_style && clip.recommendation.style !== clip.applied_style.style && (
@@ -71,10 +72,12 @@ export function ClipRow({ clip, jobId }: { clip: Clip; jobId: string }) {
                 SRT
               </a>
             )}
-            <Link href={`/jobs/${jobId}/clips/${clip.id}`} className={buttonClass("secondary", "md")}>
-              <PenLine className="size-4" aria-hidden />
-              Edit
-            </Link>
+            {clip.kind !== "compilation" && (
+              <Link href={`/jobs/${jobId}/clips/${clip.id}`} className={buttonClass("secondary", "md")}>
+                <PenLine className="size-4" aria-hidden />
+                Edit
+              </Link>
+            )}
           </div>
         </div>
 
@@ -162,12 +165,16 @@ export function ClipRow({ clip, jobId }: { clip: Clip; jobId: string }) {
           </div>
         )}
 
-        <details className="mt-6 max-w-2xl">
-          <summary className="text-sm text-muted hover:text-fg">How this score was built</summary>
-          <div className="mt-4">
-            <ScoreBreakdown clip={clip} />
-          </div>
-        </details>
+        {clip.growth && <GrowthToolkit g={clip.growth} />}
+
+        {clip.kind !== "compilation" && (
+          <details className="mt-6 max-w-2xl">
+            <summary className="text-sm text-muted hover:text-fg">How this score was built</summary>
+            <div className="mt-4">
+              <ScoreBreakdown clip={clip} />
+            </div>
+          </details>
+        )}
       </div>
     </li>
   );
