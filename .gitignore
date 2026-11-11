@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Runtime data: uploads, renders, databases, model caches — never commit user media
+data/
+*.db
+*.db-shm
+*.db-wal
+models-cache/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Media and scratch files
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.wav
+!apps/web/public/**/*.mp4
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp

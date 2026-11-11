@@ -1,0 +1,73 @@
+# ViralCut AI — full stack: PostgreSQL, API, processing worker and web app.
+#
+#   cp .env.example .env      # optional: adjust settings
+#   docker compose up --build
+#
+# Web: http://localhost:3000   API: http://localhost:8000/docs
+
+x-backend: &backend
+  build: ./apps/api
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    VIRALCUT_DATABASE_URL: postgresql+psycopg://viralcut:${POSTGRES_PASSWORD:-viralcut}@db:5432/viralcut
+    VIRALCUT_DATA_DIR: /data
+    VIRALCUT_CORS_ORIGINS: ${VIRALCUT_CORS_ORIGINS:-http://localhost:3000}
+  volumes:
+    - media:/data
+    - models:/models
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: viralcut
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-viralcut}
+      POSTGRES_DB: viralcut
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viralcut -d viralcut"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    <<: *backend
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *backend
+    command: ["viralcut-worker"]
+    healthcheck:
+      disable: true
+    # Video processing is CPU and memory heavy: cap it so one upload cannot starve the host.
+    deploy:
+      resources:
+        limits:
+          cpus: "${WORKER_CPUS:-4}"
+          memory: ${WORKER_MEMORY:-6g}
+    # Scale out with: docker compose up --scale worker=3
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  media:
+  models:
