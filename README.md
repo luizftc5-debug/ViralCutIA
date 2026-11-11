@@ -70,6 +70,36 @@ cd apps/api && .venv/bin/viralcut-worker
 cd apps/web && npm install && npm run dev
 ```
 
+### Windows (no Docker)
+
+`scripts/dev.sh` is for Linux and macOS. On Windows, install once:
+
+1. **Python 3.11 to 3.13** (3.13 is the tested one; 3.15 does not work yet because `onnxruntime` has no wheels for it), **Node 20+** and **ffmpeg** (`winget install Gyan.FFmpeg`).
+2. Keep the project **outside OneDrive** (for example `C:\Dev\ViralCutIA`): the sync client locks the thousands of files that `pip` and `npm` create.
+3. In a terminal, from the project folder:
+
+```bat
+cd apps\api
+```
+
+```bat
+py -3.13 -m venv .venv
+```
+
+```bat
+.venv\Scripts\pip install -e ".[dev,llm]"
+```
+
+```bat
+cd ..\web
+```
+
+```bat
+npm install
+```
+
+From then on, **double-click `scripts\iniciar-viralcut.bat`**: it opens the API (port 8000) and the site (port 3000) in two windows and then the browser at http://localhost:3000. Close the two windows to stop.
+
 ### Command line
 
 Process a file without the web app and copy the clips to a folder:
