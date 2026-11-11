@@ -73,7 +73,7 @@ Nothing is kept from a rejected upload.
 
 | Field | Values |
 |---|---|
-| `captions.style` | `high_retention`, `clean_editorial`, `dynamic_creator`, `gaming` |
+| `captions.style` | `viral_dynamic` (A), `high_retention` (B, Creator High Retention), `clean_editorial` (C, Premium Minimal), `gaming` (D), `dynamic_creator` |
 | `captions.size` / `position` | `s` `m` `l` / `top` `middle` `bottom` |
 | `captions.color` | `#RRGGBB` accent, or empty for the style default |
 | `captions.font` | `auto`, `inter`, `poppins`, `anton`, `dm_serif` |
@@ -83,6 +83,9 @@ Nothing is kept from a rejected upload.
 | `platform` | `universal`, `shorts`, `reels`, `tiktok` (caption safe areas) |
 | `style` | `auto`, `dynamic`, `editorial`, `podcast`, `gaming` (pause trimming and default framing) |
 | `framing` | `auto`, `face`, `split`, `blur`, `center` |
+| `smart_zoom` | `true` (default): eased punch-ins on stressed words, only on face-tracked clips |
+| `review_transcript` | `false` (default). `true` pauses the job in status `review` after clip selection, until `POST /jobs/{id}/resume` |
+| `glossary` | Comma-separated names and terms the recogniser should prefer (max 400 characters) |
 | `min_score` | 0–100, or `null` for the server default |
 
 Returns 409 while the job is queued or processing. Calling it on a finished, failed or canceled
@@ -127,6 +130,18 @@ Stage `status`: `pending`, `active`, `done`, `skipped` (for example subtitles wh
 | DELETE | `/api/jobs/{id}` | Delete the job and every file (409 while processing) |
 | GET | `/api/jobs/{id}/export.zip` | All ready clips (MP4 + SRT), `clips.json` and `publishing-notes.txt` |
 
+## Transcript review
+
+A transcript can be read and corrected while a job is in status `review` (see `review_transcript`)
+or `completed`. Corrections change **text only**: every word keeps the time it was spoken at, and the
+recogniser's original output is kept (`transcript.original.json`).
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/jobs/{id}/transcript` | `{language, engine, words:[{index,text,start,end,confidence}], quality, edited}`. `quality` lists the segments that were discarded as non-speech and the stretches that were re-transcribed |
+| PUT | `/api/jobs/{id}/transcript` | `{words:[{index,text}], replace:[{find,replace,case_sensitive}]}`. Whole-word find and replace, or by index. On a completed job the clips that contain corrected words are queued for re-rendering; in `review` nothing renders yet. Returns `{changed, affected_clips, words}` |
+| POST | `/api/jobs/{id}/resume` | Continue a job paused for review (409 otherwise): the clips render with the corrected words |
+
 ## Clips
 
 Each entry of `clips` (and `GET /api/jobs/{id}/clips/{cid}`, which adds `transcript`, `pages` and
@@ -162,6 +177,7 @@ or `none`.
 | GET | `…/clips/{cid}/download` | MP4 as an attachment with a readable file name |
 | GET | `…/clips/{cid}/srt` | Subtitles (404 when the clip has no speech) |
 | GET | `…/clips/{cid}/thumbnail` | JPEG poster frame |
+| GET | `…/clips/{cid}` | Detail. Besides the score and pages it includes `alignment` (how word times were obtained: method, aligned words, median correction) and `qa` (including `integrated_lufs` and `true_peak_db`) |
 | PATCH | `…/clips/{cid}` | Edit and queue a re-render |
 
 ### Editing a clip

@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-CaptionStyle = Literal["high_retention", "clean_editorial", "dynamic_creator", "gaming"]
+CaptionStyle = Literal["viral_dynamic", "high_retention", "clean_editorial", "dynamic_creator", "gaming"]
 FramingMode = Literal["auto", "face", "split", "blur", "center"]
 
 DURATION_RANGES: dict[str, tuple[float, float]] = {
@@ -65,7 +65,19 @@ class JobOptions(BaseModel):
     aspect: Literal["9:16"] = "9:16"
     style: Literal["dynamic", "editorial", "podcast", "gaming", "auto"] = "auto"
     framing: FramingMode = "auto"
+    smart_zoom: bool = True  # controlled punch-ins on words the speaker really stresses
+    review_transcript: bool = (
+        False  # pause after clip selection so the transcript can be corrected before rendering
+    )
+    glossary: str = Field(
+        default="", max_length=400
+    )  # names / terms the recogniser should prefer, comma separated
     min_score: float | None = Field(default=None, ge=0, le=100)
+
+    @field_validator("glossary")
+    @classmethod
+    def _glossary(cls, v: str) -> str:
+        return ", ".join(t.strip() for t in re.split(r"[,\n;]", v or "") if t.strip())[:400]
 
     @field_validator("language")
     @classmethod

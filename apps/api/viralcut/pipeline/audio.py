@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,10 +20,16 @@ def decode_audio(
     duration: float,
     on_progress: ProgressFn | None = None,
     should_cancel: CancelFn | None = None,
+    *,
+    seek: float | None = None,
+    limit: float | None = None,
 ) -> np.ndarray:
-    """Decode the first audio stream to mono float32 PCM at 16 kHz (the rate Whisper expects)."""
+    """Decode the first audio stream to mono float32 PCM at 16 kHz (the rate Whisper expects).
+
+    ``seek``/``limit`` decode only a stretch of the file (used to align a single clip).
+    """
     args = [
-        *input_args(path, family),
+        *input_args(path, family, seek=seek, duration=limit),
         "-vn",
         "-map",
         "0:a:0",
@@ -66,8 +73,8 @@ class AudioSignals:
         return min(-30.0, self.noise_floor_db + max(6.0, (self.speech_db - self.noise_floor_db) * 0.35))
 
     def _slice(self, t0: float, t1: float) -> np.ndarray:
-        a = max(0, int(t0 / self.hop))
-        b = max(a + 1, min(len(self.rms_db), int(np.ceil(t1 / self.hop))))
+        a = max(0, int(t0 / self.hop + 1e-6))
+        b = max(a + 1, min(len(self.rms_db), int(np.ceil(t1 / self.hop - 1e-6))))
         return self.rms_db[a:b]
 
     def level(self, t0: float, t1: float) -> float:
@@ -136,3 +143,62 @@ def silent_signals(duration: float) -> AudioSignals:
     """Placeholder envelope for sources without an audio stream."""
     n = max(1, int(duration / HOP_S))
     return AudioSignals(np.full(n, -100.0, dtype=np.float32), -100.0, -100.0, 0.0)
+
+
+# --------------------------------------------------------------------------- recogniser input
+
+
+def asr_filter_chain(signals: AudioSignals, mode: str = "auto") -> tuple[str, dict]:
+    """ffmpeg filter chain that prepares audio for the speech recogniser, and why.
+
+    Only a condition that measurably hurts recognition is treated automatically: very low level
+    (the recogniser's front end then sees mostly noise floor). Clean, well-levelled speech
+    passes through untouched.
+    """
+    snr = signals.speech_db - signals.noise_floor_db
+    report: dict = {
+        "mode": mode,
+        "speech_db": round(signals.speech_db, 1),
+        "noise_floor_db": round(signals.noise_floor_db, 1),
+        "snr_db": round(snr, 1),
+        "applied": [],
+    }
+    if mode == "off":
+        return "", report
+    filters: list[str] = []
+    force = mode == "on"
+    if force or signals.speech_db < -32.0:
+        gain = float(np.clip(-23.0 - signals.speech_db, 0.0, 24.0)) if signals.speech_db > -90 else 0.0
+        if gain >= 3.0:
+            filters.append(f"volume={gain:.1f}dB")
+            report["applied"].append(f"gain +{gain:.0f} dB (speech was at {signals.speech_db:.0f} dBFS)")
+    # Spectral noise reduction is opt-in only: measured on real speech it did not lower the word
+    # error rate (Whisper is trained on noisy audio and the denoiser's artefacts cost as much
+    # as they save), so ``auto`` never applies it. See docs/TRANSCRIPTION.md.
+    if force:
+        filters.append("highpass=f=70")
+        filters.append("afftdn=nr=12:nf=-45:tn=1")
+        report["applied"].append(f"high-pass 70 Hz + spectral noise reduction (SNR {snr:.0f} dB)")
+    if filters:
+        filters.append("alimiter=limit=0.95")  # a boosted peak must never clip
+    return ",".join(filters), report
+
+
+def enhance_for_asr(
+    samples: np.ndarray, signals: AudioSignals, mode: str = "auto"
+) -> tuple[np.ndarray, dict]:
+    """Return ``(audio for the recogniser, report)``. The input array is never modified."""
+    chain, report = asr_filter_chain(signals, mode)
+    if not chain or len(samples) == 0:
+        return samples, report
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "1",
+         "-i", "pipe:0", "-af", chain, "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "1", "pipe:1"],
+        input=samples.astype(np.float32).tobytes(), capture_output=True, check=False,
+    )  # fmt: skip
+    out = np.frombuffer(proc.stdout[: len(proc.stdout) - len(proc.stdout) % 4], dtype=np.float32)
+    if proc.returncode != 0 or len(out) < len(samples) * 0.95:
+        report["applied"] = []
+        report["error"] = "enhancement failed; original audio used"
+        return samples, report
+    return out.copy(), report

@@ -31,11 +31,22 @@ class Settings(BaseSettings):
     embedded_worker: bool = False  # run the worker loop inside the API process (single-process dev mode)
 
     # --- transcription
-    whisper_model: str = "small"  # tiny | base | small | medium | large-v3 | distil-large-v3 ...
+    whisper_model: str = ""  # explicit model (tiny|base|small|medium|large-v3|large-v3-turbo|...); empty = chosen by transcription_mode
     whisper_device: str = "auto"  # auto | cpu | cuda
     whisper_compute_type: str = "auto"  # auto -> int8 on cpu, float16 on cuda
     whisper_beam_size: int = 5
     models_dir: Path | None = None  # cache dir for downloaded models (default: HF cache)
+    transcription_mode: str = "auto"  # auto | accurate | balanced | fast  (see pipeline/transcribe.py)
+    whisper_vad: bool = True  # Silero VAD (bundled with faster-whisper) before recognition
+    whisper_vad_min_silence_ms: int = 500
+    whisper_vad_speech_pad_ms: int = 400  # 300 was measured to make Whisper skip a whole utterance
+    whisper_prompt: bool = True  # short language-specific prompt that steers punctuation and accents
+    asr_enhance: str = (
+        "auto"  # auto | on | off: noise/level treatment of the audio fed to the recogniser only
+    )
+    align_mode: str = "auto"  # auto | off: CTC forced alignment of word timestamps (pt, en)
+    align_repo_overrides: str = ""  # "pt=owner/repo:onnx/model.onnx,..." to use another CTC export
+    glossary: str = ""  # comma-separated names/jargon the recogniser should prefer
 
     # --- narrative analysis (optional LLM)
     anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")

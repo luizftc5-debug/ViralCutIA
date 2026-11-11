@@ -14,6 +14,38 @@ def _iso(value: dt.datetime | None) -> str | None:
     return value.replace(tzinfo=dt.UTC).isoformat().replace("+00:00", "Z") if value else None
 
 
+def decision_notes(clip: Clip) -> list[str]:
+    """Plain-language list of what the engine decided for this clip, and why."""
+    framing = clip.framing or {}
+    edit = framing.get("edit") or {}
+    notes = list(framing.get("notes", []))
+    profile = edit.get("profile")
+    if profile:
+        why = profile["evidence"][0] if profile.get("evidence") else "no single signal dominated"
+        notes.append(f"Content type: {profile['name']} ({why}).")
+    notes += edit.get("notes", [])
+    for z in edit.get("zooms", []):
+        ev = z.get("evidence", {})
+        notes.append(
+            f"Punch-in {z['t0']:.1f}-{z['t1']:.1f}s, {z['amp'] * 100:.0f}%: {z['reason']}"
+            + (
+                f" on \u201c{ev['word']}\u201d (+{ev.get('lift_db', 0):.0f} dB over the speaker's baseline)"
+                if ev
+                else ""
+            )
+            + "."
+        )
+    align = framing.get("align") or {}
+    if align.get("method") == "ctc":
+        notes.append(
+            f"Captions aligned to the audio: {align['aligned']} of {align['words']} words, median correction "
+            f"{align['median_shift_s'] * 1000:+.0f} ms."
+        )
+    for line in (edit.get("audio") or {}).get("applied") or []:
+        notes.append(f"Audio: {line}.")
+    return notes
+
+
 def clip_out(clip: Clip, detail: bool = False) -> dict[str, Any]:
     dims = clip.dimensions or {}
     values = dims.get("values", {})
@@ -51,7 +83,7 @@ def clip_out(clip: Clip, detail: bool = False) -> dict[str, Any]:
         "framing_mode": clip.framing_mode,
         "smart_trim": clip.smart_trim,
         "layouts": (clip.framing or {}).get("layouts", []),
-        "framing_notes": (clip.framing or {}).get("notes", []),
+        "framing_notes": decision_notes(clip),
         "has_captions_burned": bool((clip.qa or {}).get("captions_burned", False)),
         "has_srt": bool(clip.pages),
         "qa": {
@@ -65,6 +97,8 @@ def clip_out(clip: Clip, detail: bool = False) -> dict[str, Any]:
                 "size_bytes",
                 "bit_rate",
                 "mean_volume_db",
+                "integrated_lufs",
+                "true_peak_db",
             )
         }
         if clip.qa
@@ -84,6 +118,8 @@ def clip_out(clip: Clip, detail: bool = False) -> dict[str, Any]:
         out["transcript"] = clip.transcript
         out["pages"] = clip.pages or []
         out["details"] = dims.get("details", {})
+        out["alignment"] = (clip.framing or {}).get("align")
+        out["edit"] = (clip.framing or {}).get("edit")
     return out
 
 

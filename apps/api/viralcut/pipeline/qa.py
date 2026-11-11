@@ -89,7 +89,7 @@ def verify_clip(
 
     # full decode: catches truncated/corrupt streams, and measures loudness of the result
     dec = run_capture(
-        ["ffmpeg", "-hide_banner", "-nostdin", "-v", "info", "-xerror", "-i", str(path), "-map", "0:v:0", "-map", "0:a:0?", "-af", "volumedetect", "-f", "null", "-"],
+        ["ffmpeg", "-hide_banner", "-nostdin", "-v", "info", "-xerror", "-i", str(path), "-map", "0:v:0", "-map", "0:a:0?", "-af", "volumedetect,ebur128=peak=true", "-f", "null", "-"],
         timeout=600,
     )  # fmt: skip
     err = dec.stderr.decode("utf-8", "replace")
@@ -99,6 +99,23 @@ def verify_clip(
     # the source had sound, so the clip must not be silent
     checks["audio_not_silent"] = (mean_db > -70.0) if source_has_audio else True
 
+    # EBU R128 summary (the last block ffmpeg prints): integrated loudness and true peak
+    summary = err[err.rfind("Summary:") :] if "Summary:" in err else ""
+    lufs_m = re.search(r"I:\s*(-?[0-9.]+|-inf) LUFS", summary)
+    peak_m = re.search(r"Peak:\s*(-?[0-9.]+|-inf) dBFS", summary)
+    lufs = float(lufs_m.group(1)) if lufs_m and lufs_m.group(1) != "-inf" else None
+    peak = float(peak_m.group(1)) if peak_m and peak_m.group(1) != "-inf" else None
+    audible = source_has_audio and lufs is not None and lufs > -60.0
+    # never clip: true peak must leave headroom. Loudness must be in the range platforms play
+    # back at without turning it up or down much (the target is -14 LUFS; the band is generous
+    # so a legitimately peaky recording is not failed, but a broken normaliser is).
+    checks["true_peak_safe"] = (peak is None or peak <= -0.5) if audible else True
+    checks["loudness_in_range"] = (-20.0 <= lufs <= -9.0) if audible else True
+    checks["audio_48k_stereo"] = (
+        audio is not None and int(audio.get("sample_rate", 0)) == 48000 and int(audio.get("channels", 0)) == 2
+    )
+    checks["square_pixels"] = video.get("sample_aspect_ratio", "1:1") in ("1:1", "0:1", None)
+
     report.update(
         {
             "width": w,
@@ -107,6 +124,11 @@ def verify_clip(
             "duration": round(v_dur, 3),
             "audio_duration": round(a_dur, 3),
             "mean_volume_db": round(mean_db, 1),
+            "integrated_lufs": lufs,
+            "true_peak_db": peak,
+            "audio_sample_rate": int((audio or {}).get("sample_rate", 0)),
+            "color_space": video.get("color_space"),
+            "video_bit_rate": int(video.get("bit_rate") or 0),
             "size_bytes": path.stat().st_size,
             "bit_rate": int(data.get("format", {}).get("bit_rate") or 0),
             "passed": all(checks.values()),

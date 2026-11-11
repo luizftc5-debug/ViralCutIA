@@ -34,6 +34,7 @@ class MediaInfo:
     pix_fmt: str = ""
     bit_rate: int = 0
     color_transfer: str = ""
+    color_space: str = ""
     container: str = ""
 
     @property
@@ -147,5 +148,6 @@ def probe(path: Path, family: str | None = None) -> MediaInfo:
         pix_fmt=video.get("pix_fmt", ""),
         bit_rate=int(fmt.get("bit_rate") or 0),
         color_transfer=video.get("color_transfer", ""),
+        color_space=video.get("color_space", ""),
         container=fmt.get("format_name", ""),
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -18,17 +18,28 @@ from ..security import FAMILY_DEMUXER, sniff_container
 from ..storage import LocalStorage, get_storage
 from . import captions as cap
 from . import llm
+from .align import align_words, refine_with_energy
 from .audio import AudioSignals, analyze_audio, decode_audio, silent_signals
 from .candidates import signal_candidates, speech_candidates
 from .copywriting import extractive_copy
+from .editing import ContentProfile, Zoom, classify_content, plan_zooms, tighten_opening
 from .ffmpeg import Cancelled, FFmpegError
 from .probe import MediaInfo, ProbeError, probe
 from .qa import QAError, verify_clip
 from .reframe import FramingPlan, Shot, plan_framing
-from .render import build_segments, make_thumbnail, output_size, render_clip, segments_time_map
+from .render import (
+    assign_zooms,
+    build_segments,
+    make_thumbnail,
+    output_size,
+    plan_audio_polish,
+    render_clip,
+    segment_boundaries,
+    segments_time_map,
+)
 from .scoring import AnalysisContext, score_signal, score_speech
 from .selection import auto_count, select
-from .text import build_sentences
+from .text import build_sentences, norm
 from .transcribe import Transcript, TranscriptionUnavailable, Word, transcribe
 from .trimming import plan_keeps
 from .visual import VisualSignals, analyze_visual
@@ -85,15 +96,19 @@ def _mid(w: Word) -> float:
 
 
 def effective_words(start: float, end: float, text_edits: dict, transcript: Transcript) -> list[Word]:
-    """Words spoken inside [start, end) on the source timeline, with the user's corrections applied."""
+    """Words spoken inside [start, end) on the source timeline, with the user's corrections applied.
+
+    Leading disfluencies ("uh", "hum") are dropped here, in the one place every code path reads
+    words from, so caption indices used by the studio always refer to the same list.
+    """
     base = [w for w in transcript.words if start <= _mid(w) < end]
     if not text_edits or text_edits.get("words") is None:
-        return base
+        return tighten_opening(base)[0]
     c0, c1 = text_edits.get("cov", [0.0, 0.0])
     edited = [Word(w["text"], w["start"], w["end"], w.get("prob", 1.0)) for w in text_edits["words"]]
     edited = [w for w in edited if start <= _mid(w) < end]
     outside = [w for w in base if not (c0 <= _mid(w) < c1)]
-    return sorted(outside + edited, key=lambda w: w.start)
+    return tighten_opening(sorted(outside + edited, key=lambda w: w.start))[0]
 
 
 # --------------------------------------------------------------------------- per-clip steps
@@ -108,9 +123,63 @@ class ClipPlan:
     plan: FramingPlan | None = None
     segments: list | None = None
     out_words: list[Word] | None = None  # output timeline
+    align: dict | None = None  # how the word timestamps were obtained (CTC alignment report)
+    profile: ContentProfile | None = None
+    zooms: list[Zoom] = field(default_factory=list)
+    edit_notes: list[str] = field(default_factory=list)
+    audio_polish: object | None = None
     duration: float = 0.0
     ass_path: Path | None = None
     version: int = 1
+
+
+def step_align(cp: ClipPlan, art: Artifacts, source: Path, should_cancel=None) -> dict:  # noqa: ANN001
+    """Re-time the clip's words to the waveform (CTC forced alignment, then loudness refinement).
+
+    Whisper's native timestamps lead the audio by ~0.2 s on average; captions make that visible.
+    Failure here must never block rendering: the words then keep Whisper's timing.
+    """
+    info: dict = {"method": "whisper", "note": "no words"}
+    if not cp.words:
+        cp.align = info
+        return info
+    lo = max(0.0, cp.start - 1.0)
+    hi = min(art.media.duration, cp.end + 1.0)
+    try:
+        if art.media.has_audio:
+            samples = decode_audio(source, art.family, hi - lo, None, should_cancel, seek=lo, limit=hi - lo)
+            cp.words, stats = align_words(cp.words, samples, art.transcript.language, origin=lo)
+            info = stats.to_dict()
+    except Cancelled:
+        raise
+    except Exception as exc:  # alignment is an improvement, never a hard dependency
+        log.warning("forced alignment failed for clip %s: %s", cp.clip_id, exc)
+        info = {"method": "whisper", "note": f"alignment failed: {type(exc).__name__}"}
+    cp.words, rs = refine_with_energy(cp.words, art.audio)
+    info["energy_refined"] = {"starts": rs.moved_starts, "ends": rs.moved_ends}
+    cp.align = info
+    # tight in-point: the first frame is the first real word (a dropped disfluency or a long silent
+    # lead-in is cut), with a short breath before it
+    lead = cp.words[0].start - cp.start if cp.words else 0.0
+    if lead > 0.35 and cp.end - (cp.words[0].start - 0.2) >= 3.0:
+        cp.edit_notes.append(
+            f"opening tightened: {lead - 0.2:.1f}s of lead-in removed so the clip starts on the first word"
+        )
+        cp.start = cp.words[0].start - 0.2
+    return info
+
+
+def framing_json(cp: ClipPlan) -> dict:
+    out = cp.plan.to_dict()
+    if cp.align is not None:
+        out["align"] = cp.align
+    out["edit"] = {
+        "profile": cp.profile.to_dict() if cp.profile else None,
+        "zooms": [z.to_dict() for z in cp.zooms],
+        "notes": cp.edit_notes,
+        "audio": getattr(cp.audio_polish, "report", None),
+    }
+    return out
 
 
 def step_framing(
@@ -122,13 +191,31 @@ def step_framing(
     smart_trim: bool,
     on_progress=None,
     should_cancel=None,
+    *,
+    user_style: str = "auto",
+    smart_zoom: bool = True,
 ) -> None:  # noqa: ANN001
+    """Decide the clip's reframing, pacing and punch-ins from what is actually in it."""
     from .render import output_fps
 
-    keeps = plan_keeps(cp.words, cp.start, cp.end, art.audio, max_pause if smart_trim else None)
     cp.plan = plan_framing(
         source, art.family, art.media, cp.start, cp.end, framing_mode, on_progress, should_cancel
     )
+    split = any(s.layout["type"] == "split" for s in cp.plan.shots)
+    cp.profile = classify_content(
+        cp.words,
+        art.transcript.language,
+        art.audio,
+        art.visual,
+        cp.start,
+        cp.end,
+        face_ratio=cp.plan.face_ratio,
+        split_layout=split,
+        user_style=user_style,
+    )
+    # an explicit editing style keeps its own pause limit; "auto" follows the detected content
+    pause = max_pause if user_style != "auto" else cp.profile.max_pause
+    keeps = plan_keeps(cp.words, cp.start, cp.end, art.audio, pause if smart_trim else None)
     fps = output_fps(art.media)
     cp.segments = build_segments(keeps, cp.plan.shots, cp.start, fps)
     if not cp.segments:
@@ -138,6 +225,26 @@ def step_framing(
     tmap = segments_time_map(cp.segments, fps)
     cp.duration = tmap.duration
     cp.out_words = tmap.map_words(cp.words, cp.start)
+    keywords = {norm(k) for k in art.keywords[:10]}
+    zooms = plan_zooms(
+        [w for w in cp.words],
+        lambda t: tmap.to_output(t - cp.start),
+        art.audio,
+        keywords,
+        cp.profile,
+        cp.duration,
+        segment_boundaries(cp.segments, fps),
+        enabled=smart_zoom,
+    )
+    cp.zooms = assign_zooms(cp.segments, fps, zooms)
+    cp.audio_polish = plan_audio_polish(art.audio, cp.start, cp.end)
+    removed = (cp.end - cp.start) - cp.duration
+    if removed > 0.05:
+        cp.edit_notes.append(
+            f"removed {removed:.1f}s of silence (kept pauses up to {pause if pause is not None else 'n/a'} s)"
+        )
+    if cp.profile.zoom["allowed"] and smart_zoom and not cp.zooms:
+        cp.edit_notes.append("no punch-in: no word was stressed enough to justify one")
 
 
 def step_captions(
@@ -158,7 +265,17 @@ def step_captions(
     pages = cap.paginate(cp.out_words, opts, cp.duration, set(art.keywords[:10]))
     if not pages:
         return []
-    ass = cap.build_ass(pages, opts, platform, ow, oh)  # also computes the line layout used by the SRT
+    center_y = None
+    if cp.plan is not None and cp.plan.shots and all(s.layout["type"] == "blur" for s in cp.plan.shots):
+        # letterboxed picture: put captions in the blurred band, clear of the gameplay / screen content
+        center_y = cap.blur_band_anchor(
+            opts.position, platform, art.media.width, art.media.height, ow, oh, opts.style, opts.size
+        )
+        if center_y is not None:
+            cp.plan.notes.append("captions placed in the blurred band so they do not cover the picture")
+    ass = cap.build_ass(
+        pages, opts, platform, ow, oh, center_y
+    )  # also computes the line layout used by the SRT
     storage.clip_file(job_id, cp.clip_id, cp.version, "srt").write_text(
         cap.build_srt(pages), encoding="utf-8"
     )
@@ -179,8 +296,9 @@ def step_render(
 ) -> dict:  # noqa: ANN001
     out = storage.clip_file(job_id, cp.clip_id, cp.version, "video")
     params = render_clip(
-        source, art.family, art.media, cp.start, cp.segments, out, cp.ass_path, on_progress, should_cancel
-    )
+        source, art.family, art.media, cp.start, cp.segments, out, cp.ass_path, on_progress, should_cancel,
+        cp.audio_polish,
+    )  # fmt: skip
     report = verify_clip(
         out,
         expected_width=params["width"],
@@ -237,6 +355,7 @@ def run_job(job_id: str) -> None:
                 if job is not None:
                     for clip in list(job.clips):
                         s.delete(clip)
+                    job.analysis = {k: v for k, v in (job.analysis or {}).items() if k != "review"}
                     job.status = "queued"
                     job.queued_at = utcnow()
             add_log(job_id, f"Retrying (attempt {attempts + 1} of {settings.max_attempts}).", level="warn")
@@ -272,12 +391,17 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
             return
         options = JobOptions.model_validate(job.options or {})
         source = storage.source_path(job_id, job.source_ext)
-        # a retry starts clean
-        for clip in list(job.clips):
-            s.delete(clip)
+        resume = (job.analysis or {}).get("review") == "resume"
+        if not resume:
+            # a retry starts clean
+            for clip in list(job.clips):
+                s.delete(clip)
     if not source.exists():
         raise UserFacingError("The uploaded file is no longer available. Please upload it again.")
     cancelled = rep.cancelled
+    if resume:
+        _resume(job_id, rep, storage, options, source)
+        return
 
     # ---- 1. analyzing -----------------------------------------------------------------
     rep.start("analyzing")
@@ -311,16 +435,22 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
     if samples is not None and len(samples):
         try:
             lang = None if options.language == "auto" else options.language
-            transcript = transcribe(samples, lang, rep.progress, cancelled)
+            transcript = transcribe(samples, lang, rep.progress, cancelled, audio, options.glossary)
+            q = transcript.quality
             rep.log(
-                f"Transcribed {len(transcript.words)} words, language={transcript.language or '?'} ({transcript.engine})."
+                f"Transcribed {len(transcript.words)} words, language={transcript.language or '?'} "
+                f"({transcript.engine}, {q.get('mode', '?')} mode)."
             )
-            if (
-                transcript.engine != f"faster-whisper:{settings.whisper_model}"
-                and transcript.engine != "none"
-            ):
+            if q.get("dropped_segments"):
+                rep.log(
+                    f"Discarded {len(q['dropped_segments'])} segment(s) with no evidence of speech "
+                    "(music, noise or silence), so no words were invented."
+                )
+            if q.get("enhancement", {}).get("applied"):
+                rep.log("Audio prepared for recognition: " + "; ".join(q["enhancement"]["applied"]) + ".")
+            if q.get("requested_model") and q.get("model") != q.get("requested_model"):
                 warnings.append(
-                    f"Speech model '{settings.whisper_model}' was unavailable; a smaller model ({transcript.engine}) was used, so accuracy is lower."
+                    f"Speech model '{q['requested_model']}' was unavailable; a smaller model ({transcript.engine}) was used, so accuracy is lower."
                 )
         except TranscriptionUnavailable as exc:
             rep.log(f"Transcription unavailable: {exc}", "warn")
@@ -444,6 +574,10 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
             "language": transcript.language,
             "language_probability": transcript.language_probability,
             "transcription": transcript.engine,
+            "asr": {
+                **transcript.quality,
+                "dropped_segments": transcript.quality.get("dropped_segments", [])[:20],
+            },
             "words": len(transcript.words),
             "candidates": len(cands),
             "requested": want,
@@ -456,18 +590,72 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
         job.media = media.to_dict()
     rep.finish()
 
+    if plans and options.review_transcript:
+        with session_scope() as s:
+            job = s.get(Job, job_id)
+            job.status = "review"
+            job.analysis = {**(job.analysis or {}), "review": "waiting"}
+        rep.log("Paused so the transcript can be reviewed. Correct any wrong words, then continue to render.")
+        return
+    _produce(job_id, rep, storage, options, art, plans, source, has_speech)
+
+
+def _resume(job_id: str, rep: JobReporter, storage: LocalStorage, options: JobOptions, source: Path) -> None:
+    """Continue a job that was paused for transcript review: render with the corrected words."""
+    with session_scope() as s:
+        job = s.get(Job, job_id)
+        media = MediaInfo.from_dict(job.media)
+        art = Artifacts.load(storage.analysis_dir(job_id), media)
+        plans = [
+            ClipPlan(
+                c.id,
+                c.start,
+                c.end,
+                effective_words(c.start, c.end, dict(c.text_edits or {}), art.transcript),
+            )
+            for c in sorted(job.clips, key=lambda c: c.rank)
+        ]
+        job.analysis = {**(job.analysis or {}), "review": "done"}
+    rep.log("Resuming with the reviewed transcript.")
+    _produce(job_id, rep, storage, options, art, plans, source, len(art.transcript.words) >= MIN_SPEECH_WORDS)
+
+
+def _produce(
+    job_id: str,
+    rep: JobReporter,
+    storage: LocalStorage,
+    options: JobOptions,
+    art: Artifacts,
+    plans: list[ClipPlan],
+    source: Path,
+    has_speech: bool,
+) -> None:
+    """Stages 5-8: sync, reframe, subtitles, render. Runs after clip selection (or after review)."""
+    cancelled = rep.cancelled
     if not plans:
         rep.log("No segment met the quality bar; nothing was rendered.", "warn")
-        for key in ("reframing", "subtitles", "rendering"):
+        for key in ("syncing", "reframing", "subtitles", "rendering"):
             rep.finish(key, skipped=True)
         rep.start("ready")
         rep.finish()
         _finish(job_id, "completed", "")
         return
 
-    # ---- 5. smart reframing -----------------------------------------------------------
-    rep.start("reframing")
+    # ---- 5. syncing: word timestamps re-timed against the waveform ----------------------
     n = len(plans)
+    rep.start("syncing")
+    for i, cp in enumerate(plans):
+        info = step_align(cp, art, source, cancelled)
+        rep.progress((i + 1) / n, force=True)
+        if info.get("method") == "ctc":
+            rep.log(
+                f"Clip {i + 1}: {info['aligned']}/{info['words']} words forced-aligned to the audio "
+                f"(median correction {info['median_shift_s'] * 1000:+.0f} ms)."
+            )
+    rep.finish()
+
+    # ---- 6. smart reframing -----------------------------------------------------------
+    rep.start("reframing")
     for i, cp in enumerate(plans):
         step_framing(
             cp,
@@ -478,10 +666,12 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
             True,
             rep.sub(i / n, (i + 1) / n),
             cancelled,
+            user_style=options.style,
+            smart_zoom=options.smart_zoom,
         )
         with session_scope() as s:
             clip = s.get(Clip, cp.clip_id)
-            clip.framing = cp.plan.to_dict()
+            clip.framing = framing_json(cp)
             clip.duration = round(cp.duration, 3)
         removed = (cp.end - cp.start) - cp.duration
         rep.log(
@@ -493,7 +683,7 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
             raise Cancelled()
     rep.finish()
 
-    # ---- 6. subtitles -----------------------------------------------------------------
+    # ---- 7. subtitles -----------------------------------------------------------------
     if has_speech:
         rep.start("subtitles")
         for i, cp in enumerate(plans):
@@ -501,7 +691,7 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
             with session_scope() as s:
                 clip = s.get(Clip, cp.clip_id)
                 clip.pages = pages
-                clip.framing = cp.plan.to_dict()
+                clip.framing = framing_json(cp)
             rep.progress((i + 1) / n, force=True)
         rep.log(
             "Captions burned in and SRT written."
@@ -512,7 +702,7 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
     else:
         rep.finish("subtitles", skipped=True)
 
-    # ---- 7. rendering -----------------------------------------------------------------
+    # ---- 8. rendering -----------------------------------------------------------------
     rep.start("rendering")
     ready = 0
     for i, cp in enumerate(plans):
@@ -583,7 +773,11 @@ def rerender_clip(job_id: str, clip_id: str) -> None:
 
             return _throttle(f)
 
-        step_framing(cp, art, source, framing_mode, options.trim_max_pause or 0.7, smart_trim, prog(0.0, 0.2))
+        step_align(cp, art, source)
+        step_framing(
+            cp, art, source, framing_mode, options.trim_max_pause, smart_trim, prog(0.0, 0.2),
+            user_style=options.style, smart_zoom=options.smart_zoom,
+        )  # fmt: skip
         pages = step_captions(cp, art, storage, job_id, cap_opts, options.platform)
         report = step_render(cp, art, source, storage, job_id, prog(0.2, 1.0))
         with session_scope() as s:
@@ -594,7 +788,7 @@ def rerender_clip(job_id: str, clip_id: str) -> None:
             clip.progress = 1.0
             clip.error = ""
             clip.pages = pages
-            clip.framing = cp.plan.to_dict()
+            clip.framing = framing_json(cp)
             clip.qa = report
             clip.duration = report["duration"]
             # corrections are now keyed to this exact word list

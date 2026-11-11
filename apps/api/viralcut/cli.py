@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -31,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--style",
         default="high_retention",
-        choices=["high_retention", "clean_editorial", "dynamic_creator", "gaming"],
+        choices=["viral_dynamic", "high_retention", "clean_editorial", "dynamic_creator", "gaming"],
     )
     p.add_argument(
         "--edit-style", default="auto", choices=["dynamic", "editorial", "podcast", "gaming", "auto"]
@@ -40,10 +41,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--language", default="auto")
     p.add_argument("--framing", default="auto", choices=["auto", "face", "split", "blur", "center"])
     p.add_argument("--min-score", type=float, default=None)
+    p.add_argument("--no-zoom", action="store_true", help="disable the eased punch-ins on stressed words")
+    p.add_argument("--glossary", default="", help="comma-separated names/terms the recogniser should prefer")
+    p.add_argument(
+        "--mode",
+        default=None,
+        choices=["auto", "fast", "balanced", "accurate"],
+        help="speech-recognition mode (default: VIRALCUT_TRANSCRIPTION_MODE)",
+    )
     p.add_argument("--out", type=Path, default=None, help="copy rendered clips to this directory")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    if args.mode:
+        os.environ["VIRALCUT_TRANSCRIPTION_MODE"] = args.mode
+        get_settings.cache_clear()
     settings = get_settings()
     storage = get_storage()
     with args.video.open("rb") as fh:
@@ -58,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         style=args.edit_style,
         framing=args.framing,
         min_score=args.min_score,
+        smart_zoom=not args.no_zoom,
+        glossary=args.glossary,
     )
     with session_scope() as s:
         job = Job(
