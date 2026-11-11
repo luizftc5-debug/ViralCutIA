@@ -50,8 +50,13 @@ def run(cmd: list[str]) -> str:
 
 def check_python() -> None:
     v = sys.version_info
-    if v >= (3, 11):
+    if (3, 11) <= v < (3, 14):
         ok(f"Python {v.major}.{v.minor}.{v.micro}")
+    elif v >= (3, 14):
+        fail(
+            f"Python {v.major}.{v.minor} is too new: onnxruntime has no wheels for it yet. "
+            "Install Python 3.12 (winget install --id Python.Python.3.12 -e) and run the script with it."
+        )
     else:
         fail(
             f"Python {v.major}.{v.minor} found; 3.11 or newer is required (3.12 recommended)"

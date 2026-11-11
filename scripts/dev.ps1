@@ -18,13 +18,14 @@ $VenvPy = Join-Path $Api '.venv\Scripts\python.exe'
 
 function Find-Python {
     # Returns the command (as an array) of the first Python 3.11+ interpreter found.
-    $candidates = @(@('py', '-3.12'), @('py', '-3.11'), @('py', '-3'), @('python'))
+    # Only 3.11-3.13: onnxruntime (a faster-whisper dependency) has no wheels for newer Pythons yet.
+    $candidates = @(@('py', '-3.12'), @('py', '-3.13'), @('py', '-3.11'), @('python'))
     foreach ($c in $candidates) {
         $exe = $c[0]
         $rest = @($c | Select-Object -Skip 1)
         if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
         $v = & $exe @rest -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $v -and ([version]$v -ge [version]'3.11')) {
+        if ($LASTEXITCODE -eq 0 -and $v -and ([version]$v -ge [version]'3.11') -and ([version]$v -lt [version]'3.14')) {
             return , $c
         }
     }
@@ -33,8 +34,9 @@ function Find-Python {
 
 $PyCmd = Find-Python
 if (-not $PyCmd) {
-    Write-Host 'Python 3.11 or newer was not found. Install it from https://www.python.org/downloads/' -ForegroundColor Red
-    Write-Host 'and tick "Add python.exe to PATH" during setup. Then open a new PowerShell window.'
+    Write-Host 'Python 3.11, 3.12 or 3.13 was not found (3.14+ is not supported yet).' -ForegroundColor Red
+    Write-Host 'Install Python 3.12 with: winget install --id Python.Python.3.12 -e' -ForegroundColor Yellow
+    Write-Host 'Then open a new PowerShell window and run this script again.'
     exit 1
 }
 $PyExe = $PyCmd[0]
