@@ -140,7 +140,7 @@ def test_profiles_leave_headroom_and_scale_with_the_machine():
     hw = _hw(8, 16)
     eco, bal, turbo = (plan_for(p, hw) for p in ("eco", "balanced", "turbo"))
     assert eco.threads == 4 and eco.nice > bal.nice > turbo.nice == 0 and not eco.keep_asr_model
-    assert bal.threads == 7  # one core always left for the OS and the web UI
+    assert bal.threads == 8 and bal.nice > 0  # all cores, but yields to the user's own applications
     assert turbo.render_workers == 2 and turbo.threads == 4  # two renders share the machine, no oversubscription
     assert plan_for("turbo", _hw(2, 4)).render_workers == 1
     assert recommend_profile(_hw(2, 4))[0] == "eco"

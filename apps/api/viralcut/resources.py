@@ -174,8 +174,11 @@ def plan_for(profile: str | None = None, hw: Hardware | None = None) -> Resource
         workers = 2 if (n >= 4 and ram >= 8) else 1
         plan = dict(threads=max(1, n // workers), asr_threads=max(1, min(phys, 16)), onnx_threads=max(1, min(8, n)),
                     render_workers=workers, x264_preset="medium", nice=0, keep_asr_model=True)  # fmt: skip
-    else:  # balanced: one core always left for the system and the web UI
-        threads = max(1, n - 1) if n > 2 else n
+    else:
+        # balanced: every core, at lowered priority. Capping at n-1 threads was measured to cost
+        # +20 % wall time on a 60 fps render (4 cores) for no CPU saved; nice 5 already lets the
+        # user's own applications and the web UI go first whenever they need the CPU.
+        threads = n
         plan = dict(threads=threads, asr_threads=max(1, min(phys, threads, 8)), onnx_threads=max(1, min(4, threads)),
                     render_workers=1, x264_preset="medium", nice=5, keep_asr_model=True)  # fmt: skip
     # explicit operator settings always win over the profile
