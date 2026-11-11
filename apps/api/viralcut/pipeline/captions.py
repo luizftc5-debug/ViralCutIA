@@ -132,9 +132,11 @@ def effective_spec(opts: CaptionOptions) -> StyleSpec:
     if opts.words_per_page:
         upd["max_words"] = opts.words_per_page
         # room for the extra words: the per-line character budget follows the word count
-        upd["max_chars"] = min(
-            30, max(spec.max_chars, round(spec.max_chars * opts.words_per_page / spec.max_words))
-        )
+        # room for the requested words on the requested number of lines (layout still scales a
+        # page down if it would overflow the safe width, so a long line never gets clipped)
+        lines = opts.max_lines or spec.max_lines
+        per_line = spec.max_chars * opts.words_per_page / spec.max_words * spec.max_lines / lines
+        upd["max_chars"] = min(34, max(spec.max_chars, round(per_line)))
     if opts.max_lines:
         upd["max_lines"] = opts.max_lines
     if opts.line_spacing is not None:
