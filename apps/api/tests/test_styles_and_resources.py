@@ -15,7 +15,8 @@ from viralcut.pipeline.render import Segment, add_punch_transitions, jump_cuts
 from viralcut.pipeline.styles import STYLES, edit_params, recommend, resolve
 from viralcut.pipeline.transcribe import Word
 from viralcut.pipeline.variations import plan_variations
-from viralcut.resources import Hardware, plan_for, recommend as recommend_profile, use_profile, active_plan
+from viralcut.resources import Hardware, active_plan, plan_for, use_profile
+from viralcut.resources import recommend as recommend_profile
 
 # --------------------------------------------------------------------------- styles
 
@@ -35,16 +36,26 @@ def test_every_style_sets_real_parameters_and_intensity_scales_them():
 
 
 def test_auto_style_follows_detected_content_and_keeps_profile_params():
-    p = edit_params("auto", "balanced", "podcast", ["podcast: two people share the frame"], (0.7, {"allowed": True, "amp": 0.05, "min_gap": 8.0, "ramp": 0.45, "max_share": 0.25}))
+    p = edit_params(
+        "auto",
+        "balanced",
+        "podcast",
+        ["podcast: two people share the frame"],
+        (0.7, {"allowed": True, "amp": 0.05, "min_gap": 8.0, "ramp": 0.45, "max_share": 0.25}),
+    )
     assert p.style == "podcast" and p.chosen_by == "auto" and "podcast" in p.reason
     assert p.max_pause == 0.7 and p.zoom["amp"] == 0.05  # tuned profile values, not the preset's
     assert p.caption == STYLES["podcast"].caption
 
 
 def test_recommendation_is_explained_from_measurements():
-    r = recommend({"hook": 0.8, "narrative": 0.3, "value": 0.4}, "general", wpm=175, motion_pct=0.3, face_ratio=0.9)
+    r = recommend(
+        {"hook": 0.8, "narrative": 0.3, "value": 0.4}, "general", wpm=175, motion_pct=0.3, face_ratio=0.9
+    )
     assert r["style"] == "viral" and r["reasons"]
-    r = recommend({"hook": 0.3, "narrative": 0.3, "value": 0.3}, "general", wpm=140, motion_pct=0.9, face_ratio=0.0)
+    r = recommend(
+        {"hook": 0.3, "narrative": 0.3, "value": 0.3}, "general", wpm=140, motion_pct=0.9, face_ratio=0.0
+    )
     assert r["style"] == "gaming" and any("motion" in x for x in r["reasons"])
 
 
@@ -61,7 +72,13 @@ def test_job_options_custom_length_and_style_framing():
 
 def test_punch_transitions_only_on_jump_cuts_in_tracked_crops():
     crop = {"type": "crop", "w": 608, "h": 1080, "y": 0, "keys": [(0.0, 600)]}
-    segs = [Segment(0, 90, crop), Segment(120, 240, crop), Segment(240, 360, {"type": "blur"}), Segment(400, 520, crop), Segment(560, 700, crop)]
+    segs = [
+        Segment(0, 90, crop),
+        Segment(120, 240, crop),
+        Segment(240, 360, {"type": "blur"}),
+        Segment(400, 520, crop),
+        Segment(560, 700, crop),
+    ]
     t = 0.0
     for s in segs:
         s.out_start = t
@@ -104,10 +121,24 @@ def _words(n=8):
 def test_caption_overrides_reach_the_ass_file():
     base = CaptionOptions(style="high_retention")
     custom = base.model_copy(
-        update={"words_per_page": 5, "max_lines": 1, "case": "normal", "text_color": "#112233", "background": "box", "animation_intensity": "strong", "outline": 2.0}
+        update={
+            "words_per_page": 5,
+            "max_lines": 1,
+            "case": "normal",
+            "text_color": "#112233",
+            "background": "box",
+            "animation_intensity": "strong",
+            "outline": 2.0,
+        }
     )
     spec = cap.effective_spec(custom)
-    assert spec.max_words == 5 and spec.max_lines == 1 and not spec.upper and spec.background and spec.outline == 2.0
+    assert (
+        spec.max_words == 5
+        and spec.max_lines == 1
+        and not spec.upper
+        and spec.background
+        and spec.outline == 2.0
+    )
     pages = cap.paginate(_words(), custom, 5.0)
     ass = cap.build_ass(pages, custom, "universal", 1080, 1920)
     assert "\\1c&H332211&" in ass  # text colour (ASS is BGR)
@@ -141,7 +172,9 @@ def test_profiles_leave_headroom_and_scale_with_the_machine():
     eco, bal, turbo = (plan_for(p, hw) for p in ("eco", "balanced", "turbo"))
     assert eco.threads == 4 and eco.nice > bal.nice > turbo.nice == 0 and not eco.keep_asr_model
     assert bal.threads == 8 and bal.nice > 0  # all cores, but yields to the user's own applications
-    assert turbo.render_workers == 2 and turbo.threads == 4  # two renders share the machine, no oversubscription
+    assert (
+        turbo.render_workers == 2 and turbo.threads == 4
+    )  # two renders share the machine, no oversubscription
     assert plan_for("turbo", _hw(2, 4)).render_workers == 1
     assert recommend_profile(_hw(2, 4))[0] == "eco"
     assert recommend_profile(_hw(4, 16))[0] == "balanced"
@@ -180,8 +213,17 @@ def test_preview_endpoint_and_style_edits(client, worker, silent_video):
     r = client.post("/api/caption-preview", json={"captions": {"style": "cinematic", "background": "box"}})
     assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content[:2] == b"\xff\xd8"
 
-    jid = client.post("/api/jobs", params={"filename": "s.mp4"}, content=silent_video.read_bytes()).json()["id"]
-    opts = {"clip_count": 1, "min_score": 0, "variations": 2, "style": "cinematic", "intensity": "subtle", "performance": "eco"}
+    jid = client.post("/api/jobs", params={"filename": "s.mp4"}, content=silent_video.read_bytes()).json()[
+        "id"
+    ]
+    opts = {
+        "clip_count": 1,
+        "min_score": 0,
+        "variations": 2,
+        "style": "cinematic",
+        "intensity": "subtle",
+        "performance": "eco",
+    }
     assert client.post(f"/api/jobs/{jid}/start", json=opts).status_code == 200
     worker.run_once()
     job = client.get(f"/api/jobs/{jid}").json()
