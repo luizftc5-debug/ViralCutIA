@@ -102,3 +102,4 @@ def test_enhancement_does_not_mutate_input():
     out, rep = A.enhance_for_asr(x, A.analyze_audio(x), "auto")
     assert np.array_equal(x, before)
     assert rep["applied"] and float(np.sqrt(np.mean(out**2))) > float(np.sqrt(np.mean(x**2)))
+

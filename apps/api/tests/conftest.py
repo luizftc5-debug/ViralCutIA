@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,29 @@ def _isolated_env(tmp_path_factory):
     reset_engine()
     yield
     reset_engine()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ffmpeg7_strictness(tmp_path_factory):
+    """Make an older ffmpeg fail where ffmpeg 7+ does.
+
+    ffmpeg 7+ aborts a whole command when one of its outputs receives no frame ("Could not open
+    encoder before EOF"); ffmpeg 6 only warns. Users on Windows get ffmpeg 7+, so every ffmpeg the
+    tests (and the pipeline under test) start goes through a wrapper adding
+    ``-abort_on empty_output_stream``, which turns that case into an error on ffmpeg 6 too.
+    """
+    real = shutil.which("ffmpeg")
+    if not real or sys.platform == "win32":
+        yield
+        return
+    bindir = tmp_path_factory.mktemp("ffmpeg-strict")
+    wrapper = bindir / "ffmpeg"
+    wrapper.write_text(f'#!/bin/sh\nexec "{real}" -abort_on empty_output_stream "$@"\n')
+    wrapper.chmod(0o755)
+    old = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{bindir}{os.pathsep}{old}"
+    yield
+    os.environ["PATH"] = old
 
 
 def _ffmpeg(*args: str) -> None:

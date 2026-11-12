@@ -16,6 +16,14 @@
 Dois cliques em `scripts\iniciar-viralcut.bat`. Abrem duas janelas (API e site) e o navegador em
 http://localhost:3000. Para fechar, feche as duas janelas.
 
+**Mudou a pasta de lugar ou de nome?** Não precisa reinstalar: o `iniciar-viralcut.bat` percebe a
+mudança, reaponta a instalação para a pasta nova e refaz o build do site (cerca de um minuto, só
+na primeira vez). Se ainda assim der erro, rode o `atualizar-viralcut.bat`.
+
+**"The upload was interrupted" ou "Loading presets…" que nunca termina** significa que a API não
+está rodando. Olhe a janela **ViralCut API**: o motivo aparece nas últimas linhas. Teste também
+http://localhost:8000/api/health no navegador (deve mostrar um JSON).
+
 No **primeiro vídeo**, o modelo de fala é baixado (~1,6 GB) e os de sincronização (~240–380 MB),
 para `E:\Dev\ViralCutIA\models`. Durante o download a transcrição fica em 0%: é normal.
 O modelo de recorte de pessoa (25 MB) só é baixado se você usar `/tela-verde` (IA) ou
