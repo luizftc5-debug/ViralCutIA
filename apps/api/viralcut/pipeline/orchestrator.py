@@ -1087,7 +1087,7 @@ def build_compilation(job_id: str, storage: LocalStorage, rep: JobReporter, canc
         return
     out = storage.clip_file(job_id, comp_id, 1, "video")
     lst = out.with_suffix(".txt")
-    lst.write_text("".join(f"file '{f.resolve()}'\n" for f in files))
+    lst.write_text("".join(f"file '{f.resolve().as_posix()}'\n" for f in files))  # "/" works on Windows too
     res = subprocess.run(
         ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
          "-c", "copy", "-movflags", "+faststart", str(out)],

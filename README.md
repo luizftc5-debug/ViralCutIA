@@ -75,6 +75,8 @@ cd apps/web && npm install && npm run dev
 
 ### Windows (no Docker)
 
+**Guia em português, passo a passo: [docs/COMECAR.md](docs/COMECAR.md)** (`scripts\atualizar-viralcut.bat` instala/atualiza, `scripts\iniciar-viralcut.bat` abre).
+
 `scripts/dev.sh` is for Linux and macOS. On Windows, install once:
 
 1. **Python 3.11 to 3.13** (3.13 is the tested one; 3.15 does not work yet because `onnxruntime` has no wheels for it), **Node 20+** and **ffmpeg** (`winget install Gyan.FFmpeg`).
