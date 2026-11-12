@@ -12,7 +12,7 @@ import time
 from .. import cache
 from ..config import get_settings
 from ..db import get_engine
-from ..jobs import claim_clip, claim_job, purge_expired, requeue_stale
+from ..jobs import claim_clip, claim_job, purge_expired, recover_orphans, requeue_stale
 from ..pipeline.ffmpeg import require_binaries
 from ..pipeline.orchestrator import rerender_clip, run_job
 from ..resources import active_plan
@@ -82,6 +82,9 @@ class Worker:
             try:
                 get_engine()
                 require_binaries()
+                orphans = recover_orphans()
+                if orphans:
+                    log.info("recovered %d job(s)/clip(s) left running when ViralCut was closed", orphans)
                 STATUS.update(state="idle", error="")
                 return True
             except Exception as e:

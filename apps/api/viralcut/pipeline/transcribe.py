@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import threading
+import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
 
@@ -333,11 +334,23 @@ def transcribe(
         return Transcript(engine="none")
     s = get_settings()
     plan = plan_asr()
+
+    # loading the model, the audio treatment and speech detection report no progress (on the first
+    # run the model is also downloaded): log each step and honour Cancel between them
+    def check_cancel() -> None:
+        if should_cancel and should_cancel():
+            raise Cancelled()
+
+    log.info("loading speech model %s (%s, %.0f s of audio)", plan.model, plan.device, duration)
+    t_start = time.monotonic()
     model, name = load_model(plan.model)
+    log.info("speech model %s ready in %.0f s", name, time.monotonic() - t_start)
+    check_cancel()
 
     # level / noise treatment for the recogniser only (the rendered audio is never touched)
     signals = signals or analyze_audio(samples)
     asr_audio, enhancement = enhance_for_asr(samples, signals, s.asr_enhance)
+    check_cancel()
 
     chunks: list[tuple[float, float]] = []
     try:
@@ -349,6 +362,12 @@ def transcribe(
         chunks = [(c["start"] / SAMPLE_RATE, c["end"] / SAMPLE_RATE) for c in ts]
     except Exception as exc:  # pragma: no cover - VAD is part of faster-whisper
         log.warning("voice activity detection unavailable: %s", exc)
+    log.info(
+        "speech detected in %d stretch(es), %.0f s in total; decoding",
+        len(chunks),
+        sum(b - a for a, b in chunks),
+    )
+    check_cancel()
 
     prompt = None
     if s.whisper_prompt and language in _PROMPTS:
