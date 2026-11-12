@@ -19,6 +19,10 @@ from ..resources import active_plan
 
 log = logging.getLogger("viralcut.worker")
 
+# what the in-process worker is doing, reported by GET /api/health so the site can say why a
+# video is still waiting ("off" = no embedded worker here: a separate worker process may run)
+STATUS: dict[str, str] = {"state": "off", "error": "", "job": ""}
+
 
 class Worker:
     def __init__(self) -> None:
@@ -53,18 +57,42 @@ class Worker:
         if claimed is not None:
             job_id, clip_id = claimed
             log.info("re-rendering clip %s", clip_id[:8])
-            rerender_clip(job_id, clip_id)
+            STATUS.update(state="busy", job=job_id)
+            try:
+                rerender_clip(job_id, clip_id)
+            finally:
+                STATUS.update(state="idle", job="")
             return True
         job_id = claim_job(self.worker_id)
         if job_id is not None:
             log.info("processing job %s", job_id[:8])
-            run_job(job_id)
+            STATUS.update(state="busy", job=job_id)
+            try:
+                run_job(job_id)
+            finally:
+                STATUS.update(state="idle", job="")
             return True
         return False
 
+    def _wait_until_ready(self) -> bool:
+        """Retry start-up (database, ffmpeg) instead of dying: a dead worker thread leaves every
+        video "Waiting for a free worker" forever while the API keeps answering normally."""
+        STATUS.update(state="starting", error="")
+        while not self.stop_event.is_set():
+            try:
+                get_engine()
+                require_binaries()
+                STATUS.update(state="idle", error="")
+                return True
+            except Exception as e:
+                STATUS.update(state="error", error=str(e))
+                log.error("worker cannot start: %s (retrying in 15 s)", e)
+                self.stop_event.wait(15)
+        return False
+
     def run_forever(self) -> None:
-        get_engine()
-        require_binaries()
+        if not self._wait_until_ready():
+            return
         interval = get_settings().worker_poll_interval_s
         log.info("worker %s started", self.worker_id)
         while not self.stop_event.is_set():

@@ -77,7 +77,9 @@ def _get_clip(s, job_id: str, clip_id: str) -> Clip:  # noqa: ANN001
 
 @router.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "version": __version__}
+    from ..worker.main import STATUS
+
+    return {"status": "ok", "version": __version__, "worker": dict(STATUS)}
 
 
 @router.get("/config")

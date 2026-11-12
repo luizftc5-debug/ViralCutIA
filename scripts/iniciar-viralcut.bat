@@ -15,6 +15,14 @@ if not exist "%ROOT%\apps\web\node_modules" (
   pause
   exit /b 1
 )
+rem without ffmpeg the worker cannot run and every video waits forever in the queue
+where ffmpeg >nul 2>nul
+if errorlevel 1 (
+  echo ffmpeg was not found. Install it with:  winget install Gyan.FFmpeg
+  echo Then close this window and open iniciar-viralcut.bat again.
+  pause
+  exit /b 1
+)
 if not exist "%ROOT%\apps\web\.next\BUILD_ID" (
   echo Building the site once ^(about a minute^)...
   pushd "%ROOT%\apps\web"

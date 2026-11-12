@@ -332,8 +332,16 @@ const json = (body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
+export interface Health {
+  status: string;
+  version: string;
+  /** the worker inside the API process; "off" means jobs are run by a separate worker process */
+  worker?: { state: "off" | "starting" | "idle" | "busy" | "error"; error: string; job: string };
+}
+
 export const api = {
   config: () => request<AppConfig>("/api/config"),
+  health: () => request<Health>("/api/health"),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   start: (id: string, options: JobOptions) => request<Job>(`/api/jobs/${id}/start`, { method: "POST", ...json(options) }),
   cancel: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),

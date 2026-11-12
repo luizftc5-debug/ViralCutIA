@@ -10,7 +10,7 @@ import { SiteHeader } from "@/components/site-header";
 import { TranscriptReview } from "@/components/transcript-review";
 import { JobLog, StageList } from "@/components/stage-list";
 import { Button, buttonClass, Notice, ProgressBar } from "@/components/ui";
-import { api, DEFAULT_OPTIONS, exportUrl, type Job, type JobOptions } from "@/lib/api";
+import { api, DEFAULT_OPTIONS, exportUrl, type Health, type Job, type JobOptions } from "@/lib/api";
 import { languageName, timecode } from "@/lib/format";
 import { forgetJob, rememberJob } from "@/lib/recent";
 import { useJob } from "@/lib/use-job";
@@ -32,6 +32,25 @@ export default function JobPage() {
   const [showLog, setShowLog] = useState(false);
   const [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [worker, setWorker] = useState<Health["worker"]>();
+  const queued = job?.status === "queued";
+
+  // a video that stays queued is either behind another video or the worker is not running: say which
+  useEffect(() => {
+    if (!queued) return;
+    let alive = true;
+    const poll = () =>
+      api.health().then(
+        (h) => alive && setWorker(h.worker),
+        () => undefined,
+      );
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [queued]);
 
   useEffect(() => {
     if (job) rememberJob({ id: job.id, filename: job.filename, createdAt: job.created_at });
@@ -108,6 +127,20 @@ export default function JobPage() {
         {active && (
           <section className="mt-3 max-w-2xl" aria-live="polite">
             <h1 className="text-4xl font-semibold">{job.status === "queued" ? "Waiting for a free worker" : "Finding your best moments"}</h1>
+            {job.status === "queued" && worker?.state === "error" && (
+              <div className="mt-4">
+                <Notice tone="error">
+                  The processing worker cannot start: {worker.error}. Fix it and restart ViralCut (on Windows: install ffmpeg with “winget install Gyan.FFmpeg”, then close and reopen iniciar-viralcut.bat).
+                </Notice>
+              </div>
+            )}
+            {job.status === "queued" && worker?.state === "busy" && worker.job !== job.id && (
+              <div className="mt-4">
+                <Notice tone="warn">
+                  The worker is busy with <Link className="underline" href={`/jobs/${worker.job}`}>another video</Link>. This one starts when it finishes, or cancel that one first.
+                </Notice>
+              </div>
+            )}
             <div className="mt-6 flex items-center gap-4">
               <div className="flex-1">
                 <ProgressBar value={job.progress} label="Overall progress" indeterminate={job.status === "queued"} />
