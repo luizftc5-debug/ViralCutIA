@@ -37,8 +37,9 @@ jobs:
       - name: Cache speech model
         uses: actions/cache@v4
         with:
-          path: ~/.cache/huggingface
-          key: speech-models-v2
+          # models are downloaded into <checkout>/models (apps/api/viralcut/config.py)
+          path: models
+          key: speech-models-v3
       - name: Integration tests (real speech recognition)
         run: pytest -q -m integration
         env:

@@ -173,7 +173,7 @@ def _resolve_device() -> tuple[str, str]:
 
 
 def _add_nvidia_wheels_to_path() -> None:
-    """Windows: let CTranslate2 find cuBLAS/cuDNN installed as pip wheels (scripts\\ativar-gpu.bat)."""
+    """Windows: let CTranslate2 find cuBLAS/cuDNN installed as pip wheels (docs/COMECAR.md, GPU)."""
     if sys.platform != "win32":
         return
     try:

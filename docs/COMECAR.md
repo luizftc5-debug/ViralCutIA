@@ -65,7 +65,25 @@ Se mover o projeto para outra pasta ou disco, tudo vai junto: os caminhos são r
 do projeto. Depois de mover, rode `scripts\atualizar-viralcut.bat` uma vez (o ambiente Python
 guarda o caminho antigo). Para usar outra pasta de modelos, defina `VIRALCUT_MODELS_DIR` no `.env`.
 
-## 6. Bom saber
+## 6. Se algo parar
+
+* **A tela de progresso diz o que está acontecendo** em cada etapa: o download de um modelo com o
+  tamanho ("640 MB of 1.6 GB"), o carregamento do modelo, a transcrição e um relógio da etapa.
+  Uma barra que se move sem porcentagem significa "trabalhando", não travado.
+* **Se o processamento parar**, a página diz em qual etapa e abre o *technical log* sozinha. As
+  linhas em vermelho são o erro; mande um print delas se precisar de ajuda.
+* **Fechar o ViralCut no meio** não deixa o vídeo preso: ao abrir de novo, ele volta para a fila
+  (ou fica cancelado, se você tinha pedido para cancelar).
+* **Placa de vídeo (NVIDIA)**: a transcrição só usa a placa depois de um teste rápido na primeira
+  vez. Se a placa for antiga ou faltarem as bibliotecas da NVIDIA (cuBLAS e cuDNN), tudo roda no
+  processador automaticamente e o log diz o motivo. Para tentar a placa, instale as bibliotecas
+  no ambiente do ViralCut e reabra:
+  ```bash
+  E:\Dev\ViralCutIA\apps\api\.venv\Scripts\python.exe -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+  ```
+  Isso é opcional: no processador o resultado é o mesmo, só mais lento.
+
+## 7. Bom saber
 
 * Os arquivos são apagados automaticamente após 24 h (`VIRALCUT_RETENTION_HOURS` no `.env`).
 * Nada é publicado automaticamente. Use músicas e imagens que você tenha direito de usar.
