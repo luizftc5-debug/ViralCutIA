@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import get_settings
+from ..models import DownloadWatch, report
 from ..resources import active_plan, lower_priority
 from .ffmpeg import CancelFn, Cancelled, FFmpegError, ProgressFn, read_pipe
 
@@ -47,7 +48,13 @@ def _load():  # noqa: ANN202
 
             s = get_settings()
             kw = {"cache_dir": str(s.models_dir)} if s.models_dir else {}
-            path = hf_hub_download(MODEL_REPO, MODEL_FILE, **kw)
+            try:
+                path = hf_hub_download(MODEL_REPO, MODEL_FILE, local_files_only=True, **kw)
+            except Exception:
+                what = "Downloading the person cut-out model, first time only"
+                with DownloadWatch(what, MODEL_REPO, patterns=[MODEL_FILE]):
+                    path = hf_hub_download(MODEL_REPO, MODEL_FILE, **kw)
+                report("")
             so = ort.SessionOptions()
             so.intra_op_num_threads = active_plan().onnx_threads
             so.inter_op_num_threads = 1

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import socket
 import time
 
 from sqlalchemy import select, update
@@ -149,8 +150,10 @@ class JobReporter:
         self.stage = stage
         self._stage_t0[stage] = time.monotonic()
 
+        started = utcnow().isoformat(timespec="seconds") + "Z"  # the page runs a clock from it
+
         def m(stages: dict) -> None:
-            stages[stage] = {"status": "active", "progress": 0.0}
+            stages[stage] = {"status": "active", "progress": 0.0, "started_at": started}
 
         self._update(m)
         self._last_write = time.monotonic()
@@ -166,6 +169,26 @@ class JobReporter:
         def m(stages: dict) -> None:
             cur = stages.get(stage, {"status": "active", "progress": 0.0})
             stages[stage] = {"status": "active", "progress": max(value, float(cur.get("progress", 0.0)))}
+            for keep in ("detail", "started_at"):  # what the page shows next to the bar
+                if cur.get(keep):
+                    stages[stage][keep] = cur[keep]
+
+        self._update(m)
+
+    def detail(self, text: str) -> None:
+        """One line under the active stage saying what is happening right now (a download,
+        loading a model). Also a heartbeat: long silent steps no longer look like a dead worker."""
+        stage = self.stage
+        if not stage:
+            return
+
+        def m(stages: dict) -> None:
+            cur = dict(stages.get(stage, {"status": "active", "progress": 0.0}))
+            if text:
+                cur["detail"] = text[:200]
+            else:
+                cur.pop("detail", None)
+            stages[stage] = cur
 
         self._update(m)
 
@@ -238,6 +261,53 @@ def requeue_stale() -> int:
             if clip.job.status in ("completed",):
                 clip.status = "failed"
                 clip.error = "Rendering stopped unexpectedly. Please try again."
+    return n
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except Exception:  # pragma: no cover - psutil missing: assume alive, the stale timeout still applies
+        return True
+
+
+def recover_orphans() -> int:
+    """At worker start-up: free work claimed by a process on this machine that no longer exists.
+
+    Closing the API window mid-job left the video "processing" (it could not be canceled or
+    deleted) until the 30-minute stale timeout re-queued it. A worker id is host:pid:thread, so a
+    claim from this host whose process is gone is certainly dead and is recovered right away.
+    """
+    host = socket.gethostname()
+    n = 0
+    with session_scope() as s:
+        for job in s.execute(select(Job).where(Job.status == "processing")).scalars().all():
+            h, _, rest = (job.worker_id or "").partition(":")
+            pid = rest.partition(":")[0]
+            if h != host or not pid.isdigit() or _process_alive(int(pid)):
+                continue
+            n += 1
+            if job.cancel_requested:
+                job.status = "canceled"
+                job.finished_at = utcnow()
+            else:
+                job.status = "queued"
+                job.queued_at = utcnow()
+                s.add(
+                    JobLog(
+                        job_id=job.id,
+                        level="warn",
+                        message="ViralCut was closed during processing; job re-queued.",
+                    )
+                )
+        for clip in s.execute(select(Clip).where(Clip.status == "rendering")).scalars().all():
+            h, _, rest = (clip.worker_id or "").partition(":")
+            pid = rest.partition(":")[0]
+            if h == host and pid.isdigit() and not _process_alive(int(pid)):
+                n += 1
+                clip.status = "queued"
     return n
 
 

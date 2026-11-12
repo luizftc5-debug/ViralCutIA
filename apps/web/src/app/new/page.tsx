@@ -8,7 +8,7 @@ import { useState } from "react";
 import { CaptionControls } from "@/components/caption-controls";
 import { SiteHeader } from "@/components/site-header";
 import { TimelineDropzone } from "@/components/timeline-dropzone";
-import { applyPreset, ContentTypePicker, PresetGrid } from "@/components/creator-studio";
+import { ContentTypePicker, PresetGrid } from "@/components/creator-studio";
 import { VideoStylePicker } from "@/components/video-style-picker";
 
 // the 13-editor panel is only downloaded when Advanced mode is opened
@@ -19,12 +19,32 @@ import { Button, cx, Notice, ProgressBar, Segmented, Select, Toggle } from "@/co
 import { useUpload } from "@/components/upload-provider";
 import { api, DEFAULT_OPTIONS, type JobOptions } from "@/lib/api";
 import { fileSize, LANGUAGE_OPTIONS, timecode } from "@/lib/format";
+import { applyPreset, summarize, switchPreset } from "@/lib/presets";
 
 const INTENSITY_NOTES: Record<JobOptions["intensity"], string> = {
   subtle: "Keeps more of the original rhythm: longer pauses, fewer and smaller moves.",
   balanced: "The style as designed.",
   high: "Tighter cuts and more frequent punch-ins, within limits that keep it watchable.",
 };
+
+/** One numbered step of the set-up: a question, an optional hint, and its controls. */
+function Step({ n, title, hint, children }: { n: number; title: string; hint?: string; children: React.ReactNode }) {
+  const id = `step-${n}`;
+  return (
+    <section aria-labelledby={id} className="grid gap-x-4 gap-y-4 border-t border-line pt-8 sm:grid-cols-[2rem_minmax(0,1fr)]">
+      <span aria-hidden className="tnum flex size-7 items-center justify-center rounded-full border border-amber text-[13px] text-amber">
+        {n}
+      </span>
+      <div className="min-w-0">
+        <h2 id={id} className="text-xl font-semibold">
+          {title}
+        </h2>
+        {hint && <p className="mt-1 text-sm text-muted">{hint}</p>}
+        <div className="mt-5 space-y-6">{children}</div>
+      </div>
+    </section>
+  );
+}
 
 export default function NewVideoPage() {
   const upload = useUpload();
@@ -38,13 +58,17 @@ export default function NewVideoPage() {
   const set = <K extends keyof JobOptions>(key: K, v: JobOptions[K]) => setOptions((o) => ({ ...o, [key]: v }));
   const minScoreDefault = upload.config?.engine.min_score ?? 60;
 
-  const generate = async (override?: JobOptions) => {
+  const presets = upload.config?.presets;
+  const autoPreset = presets?.find((p) => p.key === "auto");
+
+  const generate = async () => {
     if (!upload.job) return;
     setStarting(true);
     setStartError("");
     try {
       const jobId = upload.job.id;
-      await api.start(jobId, override ?? options);
+      // no style picked means the automatic one, exactly as its card says
+      await api.start(jobId, !options.preset && autoPreset ? applyPreset(options, autoPreset) : options);
       upload.reset();
       router.push(`/jobs/${jobId}`);
     } catch (e) {
@@ -127,31 +151,32 @@ export default function NewVideoPage() {
 
           {/* settings */}
           <form
-            className="space-y-12"
+            className="space-y-8"
             onSubmit={(e) => {
               e.preventDefault();
               void generate();
             }}
           >
-            <section aria-labelledby="studio-h" className="space-y-8">
-              <div className="flex flex-wrap items-end justify-between gap-4">
-                <div>
-                  <h2 id="studio-h" className="text-2xl font-semibold">
-                    Creator Studio
-                  </h2>
-                  <p className="mt-1 text-sm text-muted">One click, a preset, or every editor by hand.</p>
-                </div>
-                <Segmented
-                  label="Interface"
-                  hideLabel
-                  value={mode}
-                  onChange={(v) => setMode(v)}
-                  options={[
-                    { value: "basic", label: "Basic" },
-                    { value: "advanced", label: "Advanced" },
-                  ]}
-                />
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-semibold">Set up your clips</h2>
+                <p className="mt-1 text-sm text-muted">
+                  {mode === "basic" ? "Three choices. Everything else is decided for you and can be changed later, clip by clip." : "Every setting is open. Anything you leave alone keeps its automatic value."}
+                </p>
               </div>
+              <Segmented
+                label="How much to configure"
+                hideLabel
+                value={mode}
+                onChange={(v) => setMode(v)}
+                options={[
+                  { value: "basic", label: "Simple" },
+                  { value: "advanced", label: "Advanced" },
+                ]}
+              />
+            </div>
+
+            <Step n={1} title="Where will you post it?" hint="Sets the shape of the video and keeps captions clear of each app’s buttons.">
               <ContentTypePicker
                 value={options.content_type}
                 onChange={(v) => setOptions((o) => ({ ...o, content_type: v, aspect: v === "youtube" ? "16:9" : o.aspect, clip_count: v === "compilation" && o.clip_count === "auto" ? 5 : o.clip_count }))}
@@ -167,35 +192,23 @@ export default function NewVideoPage() {
                   ]}
                 />
               )}
+            </Step>
 
-              <div className="rounded-xl border border-line bg-panel p-5">
-                <h3 className="text-lg font-semibold">A. Quick generation</h3>
-                <p className="mt-1 text-sm text-muted">The AI analyses the video, chooses the editing strategy per clip and renders publication-ready files.</p>
-                <Button
-                  variant="primary"
-                  className="mt-4"
-                  disabled={upload.phase !== "ready" || starting}
-                  onClick={() => {
-                    const auto = upload.config?.presets?.find((p) => p.key === "auto");
-                    const next = auto ? applyPreset(options, auto) : options;
-                    setOptions(next);
-                    void generate(next);
-                  }}
-                >
-                  Generate automatically
-                </Button>
-              </div>
-
-              <div>
-                <h3 className="text-lg font-semibold">B. Creative presets</h3>
-                <p className="mt-1 mb-3 text-sm text-muted">Each preset sets real pacing, captions, framing and editors. You can still change anything after picking one.</p>
-                {upload.config?.presets ? <PresetGrid presets={upload.config.presets} value={options.preset} onPick={(p) => setOptions((o) => applyPreset(o, p))} /> : <p className="text-sm text-faint">Loading presets…</p>}
-              </div>
-
+            <Step n={2} title="Choose an editing style" hint="A style sets the pacing, the caption design, the framing and the effects. Not sure? Leave it on automatic.">
+              {presets ? (
+                <PresetGrid
+                  presets={presets}
+                  value={options.preset || "auto"}
+                  recommended="auto"
+                  onPick={(p) => setOptions((o) => switchPreset(o, p, presets.find((x) => x.key === o.preset)))}
+                />
+              ) : (
+                <p className="text-sm text-faint">Loading styles…</p>
+              )}
               {mode === "advanced" && (
                 <div>
-                  <h3 className="text-lg font-semibold">C. Advanced editors</h3>
-                  <p className="mt-1 mb-3 text-sm text-muted">Thirteen specialised editors. Each switch changes the exported video.</p>
+                  <h3 className="text-base font-semibold">Editors</h3>
+                  <p className="mt-1 mb-3 text-sm text-muted">Thirteen specialised editors. The style above already switched on the ones it uses; each switch changes the exported video.</p>
                   <EditorsPanel
                     editors={options.editors}
                     onChange={(e) => set("editors", e)}
@@ -206,13 +219,10 @@ export default function NewVideoPage() {
                   />
                 </div>
               )}
-            </section>
+            </Step>
 
-            <section aria-labelledby="captions-q" className="border-t border-line pt-10">
-              <h2 id="captions-q" className="text-2xl font-semibold">
-                Do you want captions on your clips?
-              </h2>
-              <div className="mt-5 grid gap-3 sm:grid-cols-2" role="radiogroup" aria-labelledby="captions-q">
+            <Step n={3} title="Do you want captions on the clips?">
+              <div className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Captions">
                 {[
                   { on: true, title: "Yes", body: "Automatic captions, synced to each spoken word." },
                   { on: false, title: "No", body: "Clean cuts with nothing drawn on the picture." },
@@ -234,36 +244,37 @@ export default function NewVideoPage() {
                 })}
               </div>
 
-              {options.captions.enabled && mode === "basic" ? (
-                <p className="mt-4 text-sm text-faint">Caption design follows the preset. Switch to Advanced for every caption style and Caption Studio.</p>
-              ) : options.captions.enabled ? (
-                <div className="mt-8 space-y-6">
-                  <CaptionControls
-                    value={options.captions}
-                    onChange={(c) => set("captions", c)}
-                    fonts={upload.config?.caption_fonts}
-                    defaultAccent={upload.config?.caption_styles.find((s) => s.key === options.captions.style)?.accent}
-                    preview={{
-                      platform: options.platform,
-                      jobId: upload.phase === "ready" ? upload.job?.id : undefined,
-                      language: options.language === "auto" ? undefined : options.language,
-                      autoStyle: upload.config?.video_styles?.find((v) => v.key === options.style)?.caption,
-                    }}
-                  />
-                </div>
-              ) : (
-                <p className="mt-4 text-sm text-faint">You still get an SRT subtitle file with each clip, in case you want captions added by the platform.</p>
+              {options.captions.enabled && mode === "advanced" && (
+                <CaptionControls
+                  value={options.captions}
+                  onChange={(c) => set("captions", c)}
+                  fonts={upload.config?.caption_fonts}
+                  defaultAccent={upload.config?.caption_styles.find((s) => s.key === options.captions.style)?.accent}
+                  preview={{
+                    platform: options.platform,
+                    jobId: upload.phase === "ready" ? upload.job?.id : undefined,
+                    language: options.language === "auto" ? undefined : options.language,
+                    autoStyle: upload.config?.video_styles?.find((v) => v.key === options.style)?.caption,
+                  }}
+                />
               )}
-              <div className="mt-6 max-w-xs">
-                <Select label="Spoken language" value={options.language} onChange={(v) => set("language", v)} options={LANGUAGE_OPTIONS} />
+              {!options.captions.enabled && <p className="text-sm text-faint">You still get an SRT subtitle file with each clip, in case you want captions added by the platform.</p>}
+              <div className="max-w-xs">
+                <Select label="Language spoken in the video" value={options.language} onChange={(v) => set("language", v)} options={LANGUAGE_OPTIONS} />
               </div>
-            </section>
+            </Step>
+
+            {mode === "basic" && (
+              <p className="border-t border-line pt-6 text-sm text-muted">
+                Number of clips, their length, the framing, the caption design and the 13 editors are chosen automatically.{" "}
+                <button type="button" className="text-fg underline underline-offset-4 hover:text-amber" onClick={() => setMode("advanced")}>
+                  Set them yourself
+                </button>
+              </p>
+            )}
 
             {mode === "advanced" && (
-            <section aria-labelledby="clips-h" className="space-y-6 border-t border-line pt-10">
-              <h2 id="clips-h" className="text-2xl font-semibold">
-                Clips
-              </h2>
+              <Step n={4} title="Clips and format" hint="How many clips, how long, and how the picture is framed.">
               <div>
                 <Segmented
                   label="How many"
@@ -323,18 +334,20 @@ export default function NewVideoPage() {
                   </div>
                 )}
               </div>
-              <Segmented
-                label="Platform"
-                value={options.platform}
-                onChange={(v) => set("platform", v)}
-                options={[
-                  { value: "universal", label: "Universal" },
-                  { value: "shorts", label: "Shorts" },
-                  { value: "reels", label: "Reels" },
-                  { value: "tiktok", label: "TikTok" },
-                ]}
-              />
-              <p className="-mt-3 text-[13px] text-faint">Sets how far captions stay from each app’s buttons and text. Universal clears all three.</p>
+              <div>
+                <Segmented
+                  label="Caption safe area"
+                  value={options.platform}
+                  onChange={(v) => set("platform", v)}
+                  options={[
+                    { value: "universal", label: "Universal" },
+                    { value: "shorts", label: "Shorts" },
+                    { value: "reels", label: "Reels" },
+                    { value: "tiktok", label: "TikTok" },
+                  ]}
+                />
+                <p className="mt-2 text-[13px] text-faint">How far captions stay from each app’s buttons and text. Universal clears all three.</p>
+              </div>
               <VideoStylePicker
                 value={options.style}
                 styles={upload.config?.video_styles}
@@ -361,7 +374,7 @@ export default function NewVideoPage() {
                 <p className="mt-2 text-[13px] text-faint">{INTENSITY_NOTES[options.intensity]}</p>
               </div>
               <Segmented
-                label="Visual format"
+                label="Framing"
                 value={options.framing}
                 onChange={(v) => set("framing", v)}
                 options={[
@@ -394,14 +407,11 @@ export default function NewVideoPage() {
                   { value: "max", label: "Maximum quality" },
                 ]}
               />
-              <p className="text-sm text-muted">Format: {options.content_type === "youtube" || (options.content_type === "compilation" && options.aspect === "16:9") ? "horizontal 16:9" : "vertical 9:16"}.</p>
-            </section>
+              </Step>
             )}
 
             {mode === "advanced" && (
-            <details className="border-t border-line pt-6">
-              <summary className="text-sm text-muted hover:text-fg">Advanced</summary>
-              <div className="mt-6 space-y-6">
+              <Step n={5} title="Fine-tuning" hint="Rarely needed. The defaults suit most videos.">
                 <label className="block max-w-md">
                   <span className="mb-2 flex justify-between text-sm text-muted">
                     Minimum score to keep a clip
@@ -436,7 +446,7 @@ export default function NewVideoPage() {
                 </label>
                 <div>
                   <Segmented
-                    label="Processing mode"
+                    label="How hard this computer works"
                     value={options.performance}
                     onChange={(v) => set("performance", v)}
                     options={[
@@ -448,26 +458,28 @@ export default function NewVideoPage() {
                   />
                   <p className="mt-2 text-[13px] text-faint">
                     {upload.config?.performance
-                      ? `Processing server: ${upload.config.performance.hardware.logical_cpus} CPU threads, ${upload.config.performance.hardware.ram_gb ?? "?"} GB RAM${upload.config.performance.hardware.gpu?.name ? `, ${upload.config.performance.hardware.gpu.name}` : ""}. ${upload.config.performance.reason}. `
+                      ? `This computer: ${upload.config.performance.hardware.logical_cpus} CPU threads, ${upload.config.performance.hardware.ram_gb ?? "?"} GB RAM${upload.config.performance.hardware.gpu?.name ? `, ${upload.config.performance.hardware.gpu.name}` : ""}. ${upload.config.performance.reason}. `
                       : ""}
-                    Eco uses half the CPU at low priority; Turbo uses all of it. Output quality is the same in every mode.
+                    Eco uses half the CPU at low priority so you can keep working; Turbo uses all of it. The result is the same in every mode.
                   </p>
                 </div>
-              </div>
-            </details>
+              </Step>
             )}
 
             {startError && <Notice tone="error">{startError}</Notice>}
 
             <div className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-black/90 backdrop-blur">
               <div className="mx-auto flex max-w-[1240px] items-center justify-between gap-4 px-5 py-4 sm:px-8">
-                <p className="hidden text-sm text-muted sm:block" aria-live="polite">
-                  {upload.phase === "uploading" && "You can generate as soon as the upload finishes."}
-                  {upload.phase === "ready" && "Processing runs on the server. You can leave this page and come back."}
-                  {upload.phase === "error" && "Fix the upload to continue."}
-                </p>
-                <Button type="submit" variant="primary" size="lg" disabled={upload.phase !== "ready" || starting} className="w-full sm:w-auto">
-                  {starting ? "Starting…" : "Generate Viral Clips"}
+                <div className="hidden min-w-0 sm:block" aria-live="polite">
+                  <p className="truncate text-sm text-fg">{summarize(options, presets)}</p>
+                  <p className="text-[13px] text-faint">
+                    {upload.phase === "uploading" && "You can generate as soon as the upload finishes."}
+                    {upload.phase === "ready" && "You can change any clip afterwards without starting over."}
+                    {upload.phase === "error" && "Fix the upload to continue."}
+                  </p>
+                </div>
+                <Button type="submit" variant="primary" size="lg" disabled={upload.phase !== "ready" || starting} className="w-full shrink-0 sm:w-auto">
+                  {starting ? "Starting…" : upload.phase === "uploading" ? `Uploading… ${Math.round(upload.progress * 100)}%` : "Generate clips"}
                 </Button>
               </div>
             </div>

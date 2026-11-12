@@ -11,32 +11,10 @@ import {
   type EditorControl,
   type EditorInfo,
   type EditorsConfig,
-  type JobOptions,
   type PresetInfo,
 } from "@/lib/api";
 
 import { cx, Notice, Toggle } from "./ui";
-
-/** Mirrors pipeline/editors.py apply_preset: a preset sets real options and switches editors on. */
-export function applyPreset(
-  options: JobOptions,
-  preset: PresetInfo,
-): JobOptions {
-  const next: JobOptions = { ...options, preset: preset.key };
-  for (const [k, v] of Object.entries(preset.options)) {
-    if (k === "clip_count" && options.clip_count !== "auto") continue; // the user's own number wins
-    if (k === "captions")
-      next.captions = { ...options.captions, ...(v as object) };
-    else (next as unknown as Record<string, unknown>)[k] = v;
-  }
-  const editors: EditorsConfig = {};
-  for (const [k, cfg] of Object.entries(options.editors))
-    editors[k] = { ...cfg };
-  for (const [k, cfg] of Object.entries(preset.editors))
-    editors[k] = { ...(editors[k] ?? {}), ...cfg };
-  next.editors = editors;
-  return next;
-}
 
 const CONTENT_TYPES: { key: ContentType; label: string; body: string }[] = [
   {
@@ -66,6 +44,8 @@ const CONTENT_TYPES: { key: ContentType; label: string; body: string }[] = [
   },
 ];
 
+export { applyPreset } from "@/lib/presets";
+
 export function ContentTypePicker({
   value,
   onChange,
@@ -76,7 +56,7 @@ export function ContentTypePicker({
   const name = useId();
   return (
     <fieldset>
-      <legend className="mb-2 text-sm text-muted">Content type</legend>
+      <legend className="sr-only">Content type</legend>
       <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">
         {CONTENT_TYPES.map((c) => (
           <label
@@ -110,10 +90,13 @@ export function PresetGrid({
   presets,
   value,
   onPick,
+  recommended,
 }: {
   presets: PresetInfo[];
   value: string;
   onPick: (p: PresetInfo) => void;
+  /** key of the preset that carries a "Recommended" mark */
+  recommended?: string;
 }) {
   return (
     <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -130,7 +113,14 @@ export function PresetGrid({
               : "border-line hover:border-line-strong",
           )}
         >
-          <span className="block text-sm font-medium">{p.label}</span>
+          <span className="flex items-center justify-between gap-2 text-sm font-medium">
+            {p.label}
+            {p.key === recommended && (
+              <span className="rounded-md border border-amber/40 px-1.5 py-0.5 text-[11px] font-normal text-amber">
+                Recommended
+              </span>
+            )}
+          </span>
           <span className="mt-0.5 block text-[12px] leading-snug text-faint">
             {p.description}
           </span>

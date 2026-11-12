@@ -145,8 +145,8 @@ export function ClipRow({ clip, jobId }: { clip: Clip; jobId: string }) {
               {clip.copy_source === "llm" ? "Title ideas, written from the transcript" : "Title ideas, quoted from the clip"}
             </h3>
             <ul className="mt-2 divide-y divide-line border-y border-line">
-              {clip.titles.map((t) => (
-                <li key={t} className="flex items-center justify-between gap-3 py-2">
+              {clip.titles.map((t, i) => (
+                <li key={`${i}-${t}`} className="flex items-center justify-between gap-3 py-2">
                   <span className="text-[15px]">{t}</span>
                   <CopyButton text={t} label="Copy title" />
                 </li>

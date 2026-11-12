@@ -513,7 +513,7 @@ def video_parts(
         post, last = post_parts(last, extras, ow, oh, fps, dur)
         parts += post
     tail = f"ass=filename={ass_name}:fontsdir=fonts," if ass_name else ""
-    parts.append(f"[{last}]{tail}format=yuv420p[vout]")
+    parts.append(f"[{last}]{tail}format=yuv420p,{_color_setparams(media)}[vout]")
     return parts
 
 
@@ -754,12 +754,29 @@ def _native_crop(segments: list[Segment], media: MediaInfo) -> str:
     return f"{media.width}x{media.height}"
 
 
-def _color_tags(media: MediaInfo) -> list[str]:
-    """Explicit BT.709 signalling so players do not guess (HDR is tone-mapped to it above)."""
+def _color_names(media: MediaInfo) -> tuple[str, str, str]:
+    """(matrix, primaries, transfer) written into the file: BT.709, or the SD source's own."""
     if media.color_space in ("smpte170m", "bt470bg"):  # SD sources keep their own matrix
         tag = "smpte170m" if media.color_space == "smpte170m" else "bt470bg"
-        return ["-colorspace", tag, "-color_primaries", tag, "-color_trc", "smpte170m", "-color_range", "tv"]
-    return ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
+        return tag, tag, "smpte170m"
+    return "bt709", "bt709", "bt709"
+
+
+def _color_tags(media: MediaInfo) -> list[str]:
+    """Explicit BT.709 signalling so players do not guess (HDR is tone-mapped to it above)."""
+    space, primaries, transfer = _color_names(media)
+    return ["-colorspace", space, "-color_primaries", primaries, "-color_trc", transfer, "-color_range", "tv"]
+
+
+def _color_setparams(media: MediaInfo) -> str:
+    """The same signalling on the frames themselves, last in the filter chain.
+
+    ffmpeg 7+ takes the colour description from the filtered frames and ignores the encoder
+    options for primaries and transfer, so files came out untagged ("unknown") and players had to
+    guess. Tagging the frames works on every version; nothing is converted.
+    """
+    space, primaries, transfer = _color_names(media)
+    return f"setparams=colorspace={space}:color_primaries={primaries}:color_trc={transfer}:range=tv"
 
 
 def make_thumbnail(video: Path, out: Path, at: float = 0.5) -> None:
@@ -811,7 +828,8 @@ def composite_clip(
     post, last = post_parts("0:v", extras, ow, oh, fps, duration, matte="matte")
     parts += post
     tail = f"ass=filename={ass_path.name}:fontsdir=fonts," if ass_path is not None else ""
-    parts.append(f"[{last}]{tail}format=yuv420p[vout]")
+    tagged = f",{_color_setparams(color_media)}" if color_media is not None else ""
+    parts.append(f"[{last}]{tail}format=yuv420p{tagged}[vout]")
     if extras.music is not None:
         parts.append("[0:a]anull[voice]")
         parts += music_parts("voice", extras.music, duration)

@@ -136,7 +136,8 @@ def test_a_failed_aligner_download_is_retried_later_not_given_up_on(monkeypatch)
     calls: list[int] = []
 
     def offline(*args, **kwargs):
-        calls.append(1)
+        if not kwargs.get("local_files_only"):  # looking on disk first is not a network attempt
+            calls.append(1)
         raise OSError("offline")
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", offline)

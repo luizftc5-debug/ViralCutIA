@@ -15,7 +15,8 @@ import numpy as np
 from .. import cache
 from ..config import get_settings
 from ..db import Clip, Job, session_scope, utcnow
-from ..jobs import JobReporter, add_log
+from ..jobs import STAGE_KEYS, STAGES, JobReporter, add_log
+from ..models import set_status_sink
 from ..options import CaptionOptions, JobOptions
 from ..resources import active_plan, use_profile
 from ..security import FAMILY_DEMUXER, sniff_container
@@ -56,7 +57,7 @@ from .styles import EditParams, edit_params
 from .styles import recommend as recommend_style
 from .styles import resolve as resolve_style
 from .text import build_sentences, norm
-from .transcribe import Transcript, TranscriptionUnavailable, Word, release_models, transcribe
+from .transcribe import Transcript, TranscriptionUnavailable, Word, device_label, release_models, transcribe
 from .transcribe import cache_key as transcribe_cache_key
 from .trimming import plan_keeps
 from .variations import hook_first, plan_variations
@@ -615,6 +616,7 @@ def run_job(job_id: str) -> None:
     with session_scope() as s:
         job = s.get(Job, job_id)
         profile = ((job.options or {}).get("performance") if job else None) or "auto"
+    set_status_sink(rep.detail)  # model downloads anywhere in the pipeline report under the stage
     try:
         with use_profile(profile) as plan:
             rep.log(
@@ -649,7 +651,49 @@ def run_job(job_id: str) -> None:
             add_log(job_id, f"Retrying (attempt {attempts + 1} of {settings.max_attempts}).", level="warn")
             storage_cleanup_partial(storage, job_id)
         else:
-            _finish(job_id, "failed", "Something went wrong while processing this video. Please try again.")
+            _finish(job_id, "failed", failure_message(rep.stage, exc))
+    finally:
+        set_status_sink(None)
+
+
+def followup_ideas(clip, cands: list, chosen: list, limit: int = 3) -> list[str]:  # noqa: ANN001
+    """Opening lines of other strong moments of the video, for the growth toolkit.
+
+    Candidates overlap heavily (the same sentences with other in/out points), so the three best
+    ones used to be one moment listed three times. Each idea now covers its own stretch of video.
+    """
+    taken = [(clip.start, clip.end)]
+    ideas: list[str] = []
+    for o in sorted((o for o in cands if o.kind == "speech" and o not in chosen), key=lambda o: -o.score):
+        if any(min(o.end, b) - max(o.start, a) > 0 for a, b in taken):
+            continue
+        line = o.text.split(".")[0][:120].strip()
+        if line and all(norm(line) != norm(x) for x in ideas):
+            ideas.append(line)
+            taken.append((o.start, o.end))
+        if len(ideas) >= limit:
+            break
+    return ideas
+
+
+def failure_message(stage: str, exc: Exception) -> str:
+    """What the job page says after an unexpected error: where it stopped and what kind of problem
+    it was, in plain words. The exact error stays in the technical log."""
+    labels = {key: label for key, label, _ in STAGES}
+    where = (
+        f" during “{labels[stage]}” (step {STAGE_KEYS.index(stage) + 1} of {len(STAGES)})"
+        if stage in labels
+        else ""
+    )
+    if isinstance(exc, FFmpegError):
+        what = "The video tool (ffmpeg) could not complete this step"
+    elif isinstance(exc, MemoryError) or "out of memory" in str(exc).lower():
+        what = "The computer ran out of memory; close other programs or choose the Eco mode"
+    elif isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
+        what = "The disk is full; free some space"
+    else:
+        what = "Something unexpected went wrong"
+    return f"Processing stopped{where}. {what}. Try again; if it stops at the same place, the technical log below has the details."
 
 
 def storage_cleanup_partial(storage: LocalStorage, job_id: str) -> None:
@@ -754,11 +798,13 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
             samples = decode_audio(source, family, media.duration, None, cancelled)
         if len(samples):
             try:
-                transcript = transcribe(samples, lang, rep.progress, cancelled, audio, options.glossary)
+                transcript = transcribe(
+                    samples, lang, rep.progress, cancelled, audio, options.glossary, rep.detail, rep.log
+                )
                 q = transcript.quality
                 rep.log(
                     f"Transcribed {len(transcript.words)} words, language={transcript.language or '?'} "
-                    f"({transcript.engine}, {q.get('mode', '?')} mode)."
+                    f"({transcript.engine}, {q.get('mode', '?')} mode, on the {device_label(q.get('device', 'cpu'))})."
                 )
                 if q.get("dropped_segments"):
                     rep.log(
@@ -914,19 +960,11 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
                     studio["hook_first"] = {**hf[2], "skipped_s": round(hf[0] - c.start, 2)}
                     studio["hook_text"] = hf[2]["text"]
             if options.growth:
-                others = [
-                    o
-                    for o in cands
-                    if o.kind == "speech"
-                    and o not in chosen
-                    and min(o.end, c.end) - max(o.start, c.start) <= 0
-                ]
-                others.sort(key=lambda o: -o.score)
                 studio["growth"] = growth.build(
                     text=c.text, titles=titles, caption=caption, hook_text=studio["hook_text"],
                     language=transcript.language, global_keywords=ctx.tfidf.keywords, category="",
                     content_type=options.content_type,
-                    followups=[o.text.split(".")[0][:120] for o in others[:3]],
+                    followups=followup_ideas(c, cands, chosen),
                     variants=[v.label for v in plan_variations(c, ctx, options.variations, options.style, options.intensity, min_d)],
                 )  # fmt: skip
             clip = Clip(

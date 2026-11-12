@@ -87,7 +87,7 @@ export function TimelineDropzone({ compact = false }: { compact?: boolean }) {
                 <span
                   key={i}
                   className={cx("flex-1 origin-center animate-draw rounded-full", picked ? "bg-amber/45" : "bg-line-strong/70", i % 2 === 1 && "hidden sm:block")}
-                  style={{ height: `${Math.min(100, h)}%`, animationDelay: `${i * 4}ms` }}
+                  style={{ height: `${Math.min(100, h).toFixed(1)}%`, animationDelay: `${i * 4}ms` }}
                 />
               );
             })}

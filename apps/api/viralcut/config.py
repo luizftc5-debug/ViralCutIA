@@ -15,11 +15,15 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 # worker happens to be started from, so the whole install moves with the project folder
 API_ROOT = Path(__file__).resolve().parent.parent
 # the checkout root (holds apps/web) when running from source; None inside the Docker image
-REPO_ROOT: Path | None = API_ROOT.parent.parent if (API_ROOT.parent.parent / "apps" / "web").is_dir() else None
+REPO_ROOT: Path | None = (
+    API_ROOT.parent.parent if (API_ROOT.parent.parent / "apps" / "web").is_dir() else None
+)
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="VIRALCUT_", env_file=(".env", str(API_ROOT / ".env")), extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="VIRALCUT_", env_file=(".env", str(API_ROOT / ".env")), extra="ignore"
+    )
 
     # --- storage / persistence
     data_dir: Path = Path("./data")

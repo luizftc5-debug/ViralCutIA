@@ -20,6 +20,16 @@ export function fileSize(bytes: number | undefined | null): string {
   return `${v >= 100 || i === 0 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }
 
+/** Elapsed time in words: 8 -> "8 s", 125 -> "2 min 05 s", 3900 -> "1 h 05 min" */
+export function elapsed(value: number | undefined | null): string {
+  if (value == null || !Number.isFinite(value)) return "";
+  const s = Math.max(0, Math.round(value));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${String(s % 60).padStart(2, "0")} s`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min`;
+}
+
 export function seconds(value: number): string {
   return value >= 60 ? timecode(value) : `${Math.round(value)}s`;
 }

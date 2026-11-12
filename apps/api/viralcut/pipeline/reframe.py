@@ -364,7 +364,9 @@ def speaker_focus(plan: FramingPlan, media: MediaInfo) -> FramingPlan:
     return FramingPlan(shots, plan.detector, plan.face_ratio, "speaker", notes)
 
 
-_PTS_RE = re.compile(r"pts_time:([0-9.]+)")
+# one "frame:N pts:N pts_time:T" line followed by "lavfi.scene_score=S" per decoded frame
+_SCENE_RE = re.compile(r"pts_time:([0-9.]+)\s*\n\s*lavfi\.scene_score=([0-9.]+)")
+SCENE_CUT = 0.32  # scene score above which a frame starts a new shot
 
 
 def plan_framing(
@@ -406,12 +408,17 @@ def plan_framing(
         graph = (
             f"[0:v]split[a][b];"
             f"[a]fps={SAMPLE_FPS},scale={dw}:{dh}:flags=bilinear,format=bgr24[det];"
-            f"[b]scale=160:-2:flags=fast_bilinear,select='gt(scene,0.32)',metadata=print:file={cuts_file.name}[cut]"
+            # every frame is kept and its scene score printed; the threshold is applied below.
+            # Dropping the frames that are not cuts (select='gt(scene,..)') left this output with
+            # no frame at all in a clip without a shot change, which ffmpeg 7+ treats as a fatal
+            # error ("Could not open encoder before EOF")
+            f"[b]scale=160:-2:flags=fast_bilinear,select='gte(scene,0)',"
+            f"metadata=mode=print:key=lavfi.scene_score:file={cuts_file.name}[cut]"
         )
         args = [
             *input_args(Path(path).resolve(), family, seek=start, duration=duration),
             "-an", "-sn", "-filter_complex", graph,
-            "-map", "[cut]", "-f", "null", "/dev/null",
+            "-map", "[cut]", "-f", "null", "-",
             "-map", "[det]", "-f", "rawvideo",
         ]  # fmt: skip
         expected = max(1.0, duration * SAMPLE_FPS)
@@ -432,9 +439,9 @@ def plan_framing(
                 on_progress(min(1.0, i / expected))
         cuts: list[float] = []
         if cuts_file.exists():
-            for m in _PTS_RE.finditer(cuts_file.read_text(errors="replace")):
-                t = float(m.group(1))
-                if 0.3 < t < duration - 0.3 and (not cuts or t - cuts[-1] >= 0.4):
+            for m in _SCENE_RE.finditer(cuts_file.read_text(errors="replace")):
+                t, score = float(m.group(1)), float(m.group(2))
+                if score > SCENE_CUT and 0.3 < t < duration - 0.3 and (not cuts or t - cuts[-1] >= 0.4):
                     cuts.append(t)
 
     notes: list[str] = []

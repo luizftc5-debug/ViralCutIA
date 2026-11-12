@@ -156,6 +156,8 @@ def job_out(job: Job, include_clips: bool = True) -> dict[str, Any]:
                 "status": stages.get(key, {}).get("status", "pending"),
                 "progress": stages.get(key, {}).get("progress", 0.0),
                 "elapsed_s": stages.get(key, {}).get("elapsed_s"),
+                "detail": stages.get(key, {}).get("detail", ""),
+                "started_at": stages.get(key, {}).get("started_at"),
             }
             for key, label, _ in STAGES
         ],

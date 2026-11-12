@@ -6,7 +6,7 @@ setlocal
 set "ROOT=%~dp0.."
 
 if not exist "%ROOT%\apps\api\.venv\Scripts\uvicorn.exe" (
-  echo The API is not installed yet. Follow docs\COMECAR.md first.
+  echo The API is not installed yet. Double-click atualizar-viralcut.bat first, then open this file again.
   pause
   exit /b 1
 )
