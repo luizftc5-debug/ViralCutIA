@@ -30,6 +30,9 @@ if not exist "%ROOT%\apps\web\.next\BUILD_ID" (
   popd
 )
 
+rem AI models (about 2 GB) go inside the project folder, not the user profile on C:
+if not defined VIRALCUT_MODELS_DIR set "VIRALCUT_MODELS_DIR=%ROOT%\models"
+if not defined HF_HOME set "HF_HOME=%VIRALCUT_MODELS_DIR%\hf"
 rem the worker runs inside the API; ECO / BALANCED / TURBO is chosen per video in the site
 set "VIRALCUT_EMBEDDED_WORKER=true"
 start "ViralCut API" /D "%ROOT%\apps\api" cmd /k .venv\Scripts\uvicorn viralcut.api.app:app --host 127.0.0.1 --port 8000
