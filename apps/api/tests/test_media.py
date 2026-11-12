@@ -298,3 +298,26 @@ def test_split_layout_moves_bottom_captions_to_the_seam(tmp_path):
     crop_y, _ = ys({"type": "blur"})
     assert max(split_y) < 1920 * 0.6 < min(crop_y)
     assert any("middle" in n for n in cp.plan.notes)
+
+
+@pytest.mark.parametrize("mode", ["auto", "face", "split"])
+def test_framing_a_clip_without_shot_change(tmp_path, mode):
+    """A clip with no shot change at all (a long gameplay take) must frame without error.
+
+    The cut-detection output used to drop every frame that was not a cut, so in such a clip it
+    received no frame; ffmpeg 7+ then aborts the whole command ("Could not open encoder before
+    EOF"). The test suite runs ffmpeg with -abort_on empty_output_stream to fail the same way.
+    """
+    import subprocess
+
+    clip = tmp_path / "one_take.mp4"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc2=s=1280x720:r=30:d=8", "-c:v", "libx264", "-preset", "ultrafast",
+         "-pix_fmt", "yuv420p", str(clip)],
+        check=True,
+    )  # fmt: skip
+    media = probe(clip)
+    plan = reframe.plan_framing(clip, None, media, 1.0, 7.0, mode)
+    assert plan.shots and plan.shots[0].start == 0.0
+    assert abs(plan.shots[-1].end - 6.0) < 0.05
