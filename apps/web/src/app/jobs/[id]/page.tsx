@@ -8,10 +8,10 @@ import { useEffect, useState } from "react";
 import { ClipRow } from "@/components/clip-row";
 import { SiteHeader } from "@/components/site-header";
 import { TranscriptReview } from "@/components/transcript-review";
-import { JobLog, StageList } from "@/components/stage-list";
+import { JobLog, StageList, useElapsed } from "@/components/stage-list";
 import { Button, buttonClass, Notice, ProgressBar } from "@/components/ui";
 import { api, DEFAULT_OPTIONS, exportUrl, type Health, type Job, type JobOptions } from "@/lib/api";
-import { languageName, timecode } from "@/lib/format";
+import { elapsed, languageName, timecode } from "@/lib/format";
 import { forgetJob, rememberJob } from "@/lib/recent";
 import { useJob } from "@/lib/use-job";
 
@@ -29,7 +29,11 @@ export default function JobPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const { job, error, refresh } = useJob(id);
-  const [showLog, setShowLog] = useState(false);
+  // the technical log opens by itself when processing failed: that is when it is needed
+  const [logChoice, setLogChoice] = useState<boolean | null>(null);
+  const showLog = logChoice ?? job?.status === "failed";
+  const setShowLog = (fn: (v: boolean) => boolean) => setLogChoice(fn(showLog));
+  const running = useElapsed(job?.started_at, job?.status === "processing");
   const [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState(false);
   const [worker, setWorker] = useState<Health["worker"]>();
@@ -102,6 +106,16 @@ export default function JobPage() {
   const a = job.analysis;
   const ready = job.clips.filter((c) => c.status === "ready");
   const rerun = (patch: Partial<JobOptions> = {}) => act(() => api.start(job.id, { ...currentOptions(job), ...patch }));
+  const current = job.stages.find((x) => x.status === "active");
+  const step = Math.min(job.stages.length, job.stages.filter((x) => x.status === "done" || x.status === "skipped").length + 1);
+  const removeJob = () => {
+    if (!window.confirm("Delete this video and all of its clips? This can’t be undone.")) return;
+    void act(async () => {
+      await api.remove(job.id);
+      forgetJob(job.id);
+      router.push("/projects");
+    });
+  };
 
   return (
     <>
@@ -126,18 +140,29 @@ export default function JobPage() {
         {/* ------------------------------------------------ processing */}
         {active && (
           <section className="mt-3 max-w-2xl" aria-live="polite">
-            <h1 className="text-4xl font-semibold">{job.status === "queued" ? "Waiting for a free worker" : "Finding your best moments"}</h1>
+            <h1 className="text-4xl font-semibold">{job.status === "queued" ? "In the queue" : job.cancel_requested ? "Stopping…" : "Working on your video"}</h1>
+            <p className="mt-3 text-muted">
+              {job.status === "queued"
+                ? "Processing starts by itself as soon as the previous video is finished."
+                : job.cancel_requested
+                  ? "It stops as soon as the current step can be interrupted. That can take up to a minute."
+                  : `Step ${step} of ${job.stages.length}${current ? `: ${current.label.toLowerCase()}` : ""}.${running != null && running >= 5 ? ` Running for ${elapsed(running)}.` : ""}`}
+            </p>
             {job.status === "queued" && worker?.state === "error" && (
               <div className="mt-4">
                 <Notice tone="error">
-                  The processing worker cannot start: {worker.error}. Fix it and restart ViralCut (on Windows: install ffmpeg with “winget install Gyan.FFmpeg”, then close and reopen iniciar-viralcut.bat).
+                  Processing cannot start: {worker.error}. Fix it and restart ViralCut (on Windows: install ffmpeg with “winget install Gyan.FFmpeg”, then close and reopen iniciar-viralcut.bat).
                 </Notice>
               </div>
             )}
             {job.status === "queued" && worker?.state === "busy" && worker.job !== job.id && (
               <div className="mt-4">
                 <Notice tone="warn">
-                  The worker is busy with <Link className="underline" href={`/jobs/${worker.job}`}>another video</Link>. This one starts when it finishes, or cancel that one first.
+                  Another video is being processed right now.{" "}
+                  <Link className="underline underline-offset-4" href={`/jobs/${worker.job}`}>
+                    See it
+                  </Link>{" "}
+                  or cancel it there to start this one sooner.
                 </Notice>
               </div>
             )}
@@ -145,7 +170,7 @@ export default function JobPage() {
               <div className="flex-1">
                 <ProgressBar value={job.progress} label="Overall progress" indeterminate={job.status === "queued"} />
               </div>
-              <span className="tnum w-12 text-right text-sm text-muted">{Math.round(job.progress * 100)}%</span>
+              <span className="tnum w-12 text-right text-sm text-muted">{job.status === "queued" ? "" : `${Math.round(job.progress * 100)}%`}</span>
             </div>
             <div className="mt-8">
               <StageList job={job} />
@@ -155,10 +180,16 @@ export default function JobPage() {
                 {job.cancel_requested ? "Canceling…" : "Cancel"}
               </Button>
               <Button variant="ghost" aria-expanded={showLog} onClick={() => setShowLog((v) => !v)}>
-                {showLog ? "Hide log" : "Show log"}
+                {showLog ? "Hide technical log" : "Show technical log"}
               </Button>
             </div>
-            <p className="mt-4 text-sm text-faint">Processing runs on the server. You can close this page and return to this link later.</p>
+            <p className="mt-4 text-sm text-faint">
+              You can close this page: processing continues in the background while ViralCut is running. This video stays under{" "}
+              <Link href="/projects" className="underline underline-offset-4 hover:text-fg">
+                Projects
+              </Link>
+              .
+            </p>
             {showLog && (
               <div className="mt-5">
                 <JobLog jobId={job.id} live />
@@ -169,17 +200,23 @@ export default function JobPage() {
 
         {/* ------------------------------------------------ failed / canceled / waiting */}
         {job.status === "failed" && (
-          <section className="mt-3 max-w-2xl">
+          <section className="mt-3 max-w-3xl">
             <h1 className="text-4xl font-semibold">Processing stopped</h1>
             <div className="mt-6">
               <Notice tone="error">{job.error || "Something went wrong while processing this video."}</Notice>
             </div>
-            <div className="mt-6 flex gap-3">
+            <p className="mt-4 text-sm text-muted">
+              Your upload is still here. Trying again reuses what was already analysed, so it is faster than the first run. The lines in red below say what failed.
+            </p>
+            <div className="mt-6 flex flex-wrap gap-3">
               <Button variant="primary" disabled={busy} onClick={() => rerun()}>
                 Try again
               </Button>
+              <Button variant="danger" disabled={busy} onClick={removeJob}>
+                Delete this video
+              </Button>
               <Button variant="ghost" aria-expanded={showLog} onClick={() => setShowLog((v) => !v)}>
-                {showLog ? "Hide log" : "Show log"}
+                {showLog ? "Hide technical log" : "Show technical log"}
               </Button>
             </div>
             {showLog && (
@@ -197,18 +234,8 @@ export default function JobPage() {
               <Button variant="primary" disabled={busy} onClick={() => rerun()}>
                 Generate clips
               </Button>
-              <Button
-                variant="danger"
-                disabled={busy}
-                onClick={() =>
-                  act(async () => {
-                    await api.remove(job.id);
-                    forgetJob(job.id);
-                    router.push("/new");
-                  })
-                }
-              >
-                Delete this upload
+              <Button variant="danger" disabled={busy} onClick={removeJob}>
+                Delete this video
               </Button>
             </div>
           </section>
@@ -259,8 +286,8 @@ export default function JobPage() {
 
             {(a.warnings ?? []).length > 0 && (
               <div className="mt-6 max-w-3xl space-y-2">
-                {(a.warnings ?? []).map((w) => (
-                  <Notice key={w} tone="warn">
+                {(a.warnings ?? []).map((w, i) => (
+                  <Notice key={`${i}-${w}`} tone="warn">
                     {w}
                   </Notice>
                 ))}
@@ -293,22 +320,15 @@ export default function JobPage() {
             <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-faint">
               {job.expires_at && <p>Files are deleted automatically on {new Date(job.expires_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}.</p>}
               <button type="button" className="text-muted underline-offset-4 hover:text-fg hover:underline" aria-expanded={showLog} onClick={() => setShowLog((v) => !v)}>
-                {showLog ? "Hide processing log" : "Show processing log"}
+                {showLog ? "Hide technical log" : "Show technical log"}
               </button>
               <button
                 type="button"
                 className="text-danger underline-offset-4 hover:underline"
                 disabled={busy}
-                onClick={() => {
-                  if (!window.confirm("Delete this video and all of its clips from the server? This can’t be undone.")) return;
-                  void act(async () => {
-                    await api.remove(job.id);
-                    forgetJob(job.id);
-                    router.push("/new");
-                  });
-                }}
+                onClick={removeJob}
               >
-                Delete now
+                Delete this video
               </button>
             </div>
             {showLog && (

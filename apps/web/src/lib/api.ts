@@ -55,7 +55,7 @@ export interface PresetInfo {
   key: string;
   label: string;
   description: string;
-  options: Partial<JobOptions> & { captions?: Partial<CaptionOptions> };
+  options: Omit<Partial<JobOptions>, "captions"> & { captions?: Partial<CaptionOptions> };
   editors: EditorsConfig;
 }
 
@@ -87,6 +87,10 @@ export interface Growth {
 export interface JobSummary {
   id: string;
   status: Job["status"];
+  stage: string;
+  progress: number;
+  stages: Stage[];
+  error: string;
   filename: string;
   created_at: string;
   media: Job["media"];
@@ -152,6 +156,10 @@ export interface Stage {
   status: "pending" | "active" | "done" | "skipped";
   progress: number;
   elapsed_s?: number | null;
+  /** when the stage became active (ISO time), for a running clock */
+  started_at?: string | null;
+  /** what is happening right now inside the stage, e.g. a model download with its size */
+  detail?: string;
 }
 
 export interface StyleRecommendation {
@@ -265,6 +273,8 @@ export interface Job {
   analysis: Analysis;
   cancel_requested: boolean;
   created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
   expires_at: string | null;
   clips: Clip[];
 }

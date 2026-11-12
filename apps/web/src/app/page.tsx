@@ -19,7 +19,7 @@ const DIMENSIONS = [
 const DELIVERABLES = [
   ["Vertical MP4, ready to post", "1080 × 1920, H.264 and AAC, original frame rate, fast-start. Every file is probed and fully decoded before it is shown as ready."],
   ["Framing that follows the speaker", "Faces are tracked shot by shot on a smoothed path. Two people who can’t share a vertical frame get a split screen; footage with no one to follow keeps the whole frame over a blurred backdrop."],
-  ["Captions timed to each word", "Four styles, burned in or left off. Lines break where the speaker pauses and stay clear of each platform’s buttons. An SRT file comes with every clip."],
+  ["Captions timed to each word", `${CAPTION_STYLES.length} styles, burned in or left off. Lines break where the speaker pauses and stay clear of each platform’s buttons. An SRT file comes with every clip.`],
   ["Tighter pacing", "Dead air is shortened only where the audio confirms it is silent, so laughter and reactions survive, and a beat after a question is kept."],
   ["Titles and a caption to post with", "Taken from what was actually said in the clip. Nothing is invented to make it sound bigger than it is."],
   ["A small studio for the last 5%", "Move the in and out points, fix a misheard word, change the caption style or framing, and render a new version."],
@@ -95,7 +95,7 @@ export default function LandingPage() {
         <section id="captions" className="border-t border-line">
           <div className="mx-auto max-w-[1240px] px-5 py-20 sm:px-8">
             <div className="max-w-2xl">
-              <h2 className="text-3xl font-semibold sm:text-4xl">Captions that help people follow, in four styles</h2>
+              <h2 className="text-3xl font-semibold sm:text-4xl">Captions that help people follow, in {CAPTION_STYLES.length} styles</h2>
               <p className="mt-5 text-muted">
                 These frames were rendered by the same engine that burns captions into your clips. Change the accent colour, size,
                 position and typeface, or turn captions off entirely.

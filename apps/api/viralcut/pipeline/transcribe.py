@@ -21,14 +21,19 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 import unicodedata
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 import numpy as np
 
 from ..config import get_settings
+from ..models import DownloadWatch, StatusFn, report
 from ..resources import active_plan, detect_hardware
 from .audio import SAMPLE_RATE, AudioSignals, analyze_audio, enhance_for_asr
 from .ffmpeg import CancelFn, Cancelled, ProgressFn
@@ -102,29 +107,189 @@ class Transcript:
 
 
 _model_lock = threading.Lock()
-_models: dict[str, object] = {}
+_models: dict[tuple[str, str, str], object] = {}  # (model, device, compute type) -> loaded model
+
+# Verdict of the one-time GPU self-test (and of a real run that failed on the GPU). While
+# ``checked`` is false a GPU is only a candidate: nothing is decoded on it before ``verify_cuda``.
+_cuda: dict = {"checked": False, "ok": False, "reason": ""}
+_cuda_lock = threading.Lock()
+
+NoteFn = Callable[[str], None]
+
+
+def _cuda_devices() -> int:
+    try:
+        import ctranslate2
+
+        return int(ctranslate2.get_cuda_device_count())
+    except Exception:
+        return 0
+
+
+def _supported_compute(device: str) -> set[str]:
+    """Numeric precisions this device can run (empty when it cannot be asked)."""
+    try:
+        import ctranslate2
+
+        return set(ctranslate2.get_supported_compute_types(device))
+    except Exception:
+        return set()
+
+
+def _pick_compute(device: str, wanted: str = "auto") -> str:
+    """A precision the device supports. Asking for one it lacks is an error in CTranslate2
+    ("Requested int8_float16 compute type, but the target device or backend do not support
+    efficient int8_float16 computation"), which made every model fail to load on older cards."""
+    supported = _supported_compute(device)
+    if wanted != "auto":
+        if not supported or wanted in supported:
+            return wanted
+        log.warning("compute type %r is not supported on %s here; choosing one that is", wanted, device)
+    if device == "cuda":
+        # FP16 weights of large-v3 need ~3.5 GB of VRAM at inference; on a small card INT8
+        # weights with FP16 compute fit in about half with a negligible accuracy cost
+        free = detect_hardware().gpu.get("vram_free_gb")
+        order = (
+            ["int8_float16", "float16"] if free is not None and free < 5.0 else ["float16", "int8_float16"]
+        )
+        order += ["int8", "float32"]  # cards without fast half precision (GTX 10xx, MX series)
+    else:
+        order = ["int8", "float32"]
+    for compute in order:
+        if not supported or compute in supported:
+            return compute
+    return "default"
 
 
 def _resolve_device() -> tuple[str, str]:
+    """Device and precision for recognition, restricted to what this machine really supports."""
     s = get_settings()
     device = s.whisper_device
     if device == "auto":
-        try:
-            import ctranslate2
+        device = "cuda" if _cuda_devices() > 0 else "cpu"
+    if device == "cuda" and _cuda["checked"] and not _cuda["ok"]:
+        device = "cpu"  # the self-test or a real run failed on the GPU: stay on the processor
+    return device, _pick_compute(device, s.whisper_compute_type)
 
-            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
-        except Exception:
-            device = "cpu"
-    compute = s.whisper_compute_type
-    if compute == "auto":
-        if device == "cuda":
-            # FP16 weights of large-v3 need ~3.5 GB of VRAM at inference; on a small card INT8
-            # weights with FP16 compute fit in about half with a negligible accuracy cost
-            free = detect_hardware().gpu.get("vram_free_gb")
-            compute = "int8_float16" if free is not None and free < 5.0 else "float16"
+
+def _add_nvidia_wheels_to_path() -> None:
+    """Windows: let CTranslate2 find cuBLAS/cuDNN installed as pip wheels (scripts\\ativar-gpu.bat)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia")
+        roots = list(spec.submodule_search_locations or []) if spec else []
+        for root in roots:
+            for bin_dir in Path(root).glob("*/bin"):
+                if str(bin_dir) not in os.environ.get("PATH", ""):
+                    os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+                    os.add_dll_directory(str(bin_dir))
+    except Exception:  # pragma: no cover - only an optimisation
+        log.debug("could not register NVIDIA wheel folders", exc_info=True)
+
+
+def _missing_cuda_libraries() -> str:
+    """Windows: which NVIDIA runtime libraries cannot be loaded ('' when all are, or unknown).
+
+    A missing cuDNN does not raise an exception inside CTranslate2, it ends the process; knowing
+    in advance avoids even starting the self-test.
+    """
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+
+        def loadable(names: tuple[str, ...]) -> bool:
+            for name in names:
+                try:
+                    ctypes.WinDLL(name, winmode=0)  # standard search order, PATH included
+                    return True
+                except OSError:
+                    continue
+            return False
+
+        missing = []
+        if not loadable(("cublas64_12.dll", "cublas64_13.dll", "cublas64_11.dll")):
+            missing.append("cuBLAS")
+        if not loadable(("cudnn_ops64_9.dll", "cudnn64_9.dll", "cudnn_ops_infer64_8.dll", "cudnn64_8.dll")):
+            missing.append("cuDNN")
+        return " and ".join(missing)
+    except Exception:  # pragma: no cover - the self-test decides
+        return ""
+
+
+# One real recognition of three seconds of noise on the GPU. Run in a child process: when a
+# CUDA library is missing or incompatible the failure can be the death of the process.
+_GPU_SELF_TEST = """
+import sys
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.kernel32.SetErrorMode(0x8003)  # fail quietly, never open an error dialog
+import numpy as np
+from faster_whisper import WhisperModel
+model = WhisperModel(sys.argv[1], device="cuda", compute_type=sys.argv[2])
+audio = (np.random.default_rng(0).standard_normal(16000 * 3) * 0.05).astype("float32")
+segments, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=False, condition_on_previous_text=False)
+list(segments)
+print("GPU-OK")
+"""
+
+
+def _run_gpu_self_test(model_path: str, compute: str) -> tuple[bool, str]:
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        res = subprocess.run(
+            [sys.executable, "-c", _GPU_SELF_TEST, model_path, compute],
+            capture_output=True, text=True, timeout=240, creationflags=flags, check=False,
+        )  # fmt: skip
+    except subprocess.TimeoutExpired:
+        return False, "the graphics card did not answer in time"
+    except OSError as exc:
+        return False, str(exc)
+    if res.returncode == 0 and "GPU-OK" in res.stdout:
+        return True, ""
+    lines = [ln.strip() for ln in (res.stderr or "").splitlines() if ln.strip()]
+    return False, (lines[-1] if lines else f"the test process ended with code {res.returncode}")[:300]
+
+
+def verify_cuda(on_status: StatusFn | None = None) -> bool:
+    """Prove once that the GPU can really run recognition before trusting it with a video.
+
+    ``get_cuda_device_count() > 0`` only says that a driver is installed. Recognition also needs
+    the cuBLAS and cuDNN libraries and a precision the card supports. The verdict is kept for the
+    life of the process; ``_cuda["reason"]`` says why a GPU is not used.
+    """
+    with _cuda_lock:
+        if _cuda["checked"]:
+            return bool(_cuda["ok"])
+        report("Checking whether the graphics card can run the speech model…", on_status)
+        _add_nvidia_wheels_to_path()
+        ok, reason = False, ""
+        missing = _missing_cuda_libraries()
+        if missing:
+            reason = f"the NVIDIA {missing} libraries are not installed"
         else:
-            compute = "int8"
-    return device, compute
+            try:
+                path = _fetch_model("tiny", on_status)
+            except Exception as exc:
+                reason = f"the test model could not be downloaded ({exc})"
+            else:
+                ok, reason = _run_gpu_self_test(
+                    path, _pick_compute("cuda", get_settings().whisper_compute_type)
+                )
+        _cuda.update(checked=True, ok=ok, reason=reason)
+        if ok:
+            log.info("GPU self-test passed: recognition runs on the graphics card")
+        else:
+            log.warning("GPU not used for recognition: %s. Running on the processor.", reason)
+        return ok
+
+
+def mark_cuda_broken(reason: str) -> None:
+    with _cuda_lock:
+        _cuda.update(checked=True, ok=False, reason=reason)
 
 
 @dataclass(frozen=True)
@@ -134,12 +299,13 @@ class ASRPlan:
     beam_size: int
     vad: bool
     device: str
+    compute: str = "int8"
 
 
 def plan_asr(mode: str | None = None) -> ASRPlan:
-    """Choose model and decoding effort from the configured mode and the available hardware."""
+    """Resolve the recognition mode into a concrete model and decoding effort for this machine."""
     s = get_settings()
-    device, _ = _resolve_device()
+    device, compute = _resolve_device()
     mode = (mode or s.transcription_mode or "auto").lower()
     cpus = os.cpu_count() or 4
     if mode == "auto":
@@ -150,11 +316,24 @@ def plan_asr(mode: str | None = None) -> ASRPlan:
         model, beam = ("small" if device == "cuda" else "base"), 1
     elif mode == "accurate":
         model, beam = ("large-v3" if device == "cuda" else "large-v3-turbo"), max(5, s.whisper_beam_size)
+        if device == "cuda" and "float16" not in compute:
+            # without half precision large-v3 needs 3 GB or more of VRAM: a small card gets turbo
+            free = detect_hardware().gpu.get("vram_free_gb")
+            if free is not None and free < 5.0:
+                model = "large-v3-turbo"
     else:  # balanced
         model, beam = "small", s.whisper_beam_size
     if s.whisper_model:  # an explicit model always wins; the mode still sets the decoding effort
         model = s.whisper_model
-    return ASRPlan(mode=mode, model=model, beam_size=beam, vad=s.whisper_vad, device=device)
+    return ASRPlan(mode=mode, model=model, beam_size=beam, vad=s.whisper_vad, device=device, compute=compute)
+
+
+def ready_plan(on_status: StatusFn | None = None) -> ASRPlan:
+    """The plan recognition will really use: a GPU is included only after its self-test passed."""
+    plan = plan_asr()
+    if plan.device == "cuda" and not verify_cuda(on_status):
+        plan = plan_asr()
+    return plan
 
 
 def _size_rank(name: str) -> int:
@@ -168,39 +347,75 @@ def _smaller(candidate: str, wanted: str) -> bool:
     return _size_rank(candidate) < _size_rank(wanted)
 
 
-def load_model(name: str | None = None):
-    """Load (and cache) a Whisper model, falling back to smaller ones if it is unavailable.
+_MODEL_FILES = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
 
-    Returns ``(model, name_actually_loaded)``.
+
+def _fetch_model(name: str, on_status: StatusFn | None = None) -> str:
+    """Folder with the model files, downloading them (with a progress report) when missing."""
+    if os.path.isdir(name):
+        return name
+    from faster_whisper import utils
+
+    s = get_settings()
+    cache_dir = str(s.models_dir) if s.models_dir else None
+    try:
+        path = utils.download_model(name, local_files_only=True, cache_dir=cache_dir)
+        if os.path.isfile(os.path.join(path, "model.bin")):
+            return path  # already on disk: no network needed
+    except Exception:
+        pass  # not downloaded yet, or only partly (an interrupted download resumes below)
+    repo = getattr(utils, "_MODELS", {}).get(name, name)
+    with DownloadWatch(
+        f"Downloading the speech model ({name}), first time only", repo, on_status, _MODEL_FILES
+    ):
+        return utils.download_model(name, cache_dir=cache_dir)
+
+
+def load_model(name: str | None = None, on_status: StatusFn | None = None, plan: ASRPlan | None = None):
+    """Load (and cache) a Whisper model, falling back to smaller ones if it cannot be fetched.
+
+    Returns ``(model, name_actually_loaded)``. A model that cannot be *downloaded* (offline host)
+    is replaced by a smaller one. A model that cannot be *started on the GPU* is a problem of the
+    device, not of the model: the error is raised so the caller switches to the processor instead
+    of downloading four more models that would fail the same way.
     """
     try:
         from faster_whisper import WhisperModel
     except Exception as exc:  # pragma: no cover - dependency missing
         raise TranscriptionUnavailable(f"faster-whisper is not installed: {exc}") from exc
 
-    s = get_settings()
-    wanted = name or plan_asr().model
+    plan = plan or plan_asr()
+    wanted = name or plan.model
     chain = [wanted] + [m for m in _FALLBACK_CHAIN if m != wanted and _smaller(m, wanted)]
-    device, compute = _resolve_device()
+    device, compute = plan.device, plan.compute
     last: Exception | None = None
     with _model_lock:
         for candidate in chain:
-            if candidate in _models:
-                return _models[candidate], candidate
+            key = (candidate, device, compute)
+            if key in _models:
+                return _models[key], candidate
             try:
-                kwargs = {"device": device, "compute_type": compute}
-                if device == "cpu":
-                    kwargs["cpu_threads"] = active_plan().asr_threads
-                if s.models_dir:
-                    kwargs["download_root"] = str(s.models_dir)
-                model = WhisperModel(candidate, **kwargs)
-                _models[candidate] = model
-                if candidate != wanted:
-                    log.warning("Whisper model %r unavailable, fell back to %r", wanted, candidate)
-                return model, candidate
+                path = _fetch_model(candidate, on_status)
             except Exception as exc:
                 last = exc
+                log.warning("speech model %r is not available: %s", candidate, exc)
+                continue
+            report("Loading the speech model…", on_status)
+            kwargs = {"device": device, "compute_type": compute}
+            if device == "cpu":
+                kwargs["cpu_threads"] = active_plan().asr_threads
+            try:
+                model = WhisperModel(path, **kwargs)
+            except Exception as exc:
+                if device == "cuda":
+                    raise
+                last = exc
                 log.warning("could not load Whisper model %r: %s", candidate, exc)
+                continue
+            _models[key] = model
+            if candidate != wanted:
+                log.warning("Whisper model %r unavailable, fell back to %r", wanted, candidate)
+            return model, candidate
     raise TranscriptionUnavailable(f"no Whisper model could be loaded ({last})")
 
 
@@ -218,7 +433,7 @@ def cache_key(digest: str, language: str | None, glossary: str = "") -> str:
     from ..cache import make_key
 
     s = get_settings()
-    plan = plan_asr()
+    plan = ready_plan()
     terms = sorted({g.strip().lower() for g in f"{s.glossary},{glossary}".split(",") if g.strip()})
     return make_key(
         "asr-v1", digest, language or "auto", plan.model, plan.beam_size, plan.vad, plan.device,
@@ -320,6 +535,10 @@ def _merge_recovered(words: list[Word], extra: list[Word]) -> list[Word]:
 # --------------------------------------------------------------------------- main entry
 
 
+def device_label(device: str) -> str:
+    return "graphics card" if device == "cuda" else "processor"
+
+
 def transcribe(
     samples: np.ndarray,
     language: str | None = None,
@@ -327,27 +546,71 @@ def transcribe(
     should_cancel: CancelFn | None = None,
     signals: AudioSignals | None = None,
     glossary: str = "",
+    on_status: StatusFn | None = None,
+    on_note: NoteFn | None = None,
 ) -> Transcript:
-    """Transcribe mono 16 kHz float32 PCM. ``language=None`` lets the model detect it."""
+    """Transcribe mono 16 kHz float32 PCM. ``language=None`` lets the model detect it.
+
+    ``on_status`` receives what is happening right now (a download, loading the model); it is
+    shown under the stage. ``on_note`` receives lasting remarks for the job log. Recognition
+    that fails on the GPU is started again on the processor instead of failing the video.
+    """
     duration = len(samples) / SAMPLE_RATE
     if duration < 0.2:
         return Transcript(engine="none")
+    plan = ready_plan(on_status)
+    if plan.device != "cuda" and _cuda["checked"] and not _cuda["ok"] and _cuda["reason"] and on_note:
+        on_note(f"Graphics card not used for recognition: {_cuda['reason']}. Running on the processor.")
+    try:
+        return _transcribe(plan, samples, language, on_progress, should_cancel, signals, glossary, on_status)
+    except (Cancelled, TranscriptionUnavailable):
+        raise
+    except Exception as exc:
+        if plan.device != "cuda":
+            raise
+        lines = [ln.strip() for ln in str(exc).splitlines() if ln.strip()]
+        reason = (lines[-1] if lines else type(exc).__name__)[:300]
+        log.warning("recognition failed on the GPU (%s); starting again on the processor", exc)
+        mark_cuda_broken(reason)
+        release_models()
+        if on_note:
+            on_note(
+                f"The graphics card failed during recognition ({reason}). Starting again on the processor."
+            )
+        return _transcribe(
+            plan_asr(), samples, language, on_progress, should_cancel, signals, glossary, on_status
+        )
+
+
+def _transcribe(
+    plan: ASRPlan,
+    samples: np.ndarray,
+    language: str | None,
+    on_progress: ProgressFn | None,
+    should_cancel: CancelFn | None,
+    signals: AudioSignals | None,
+    glossary: str,
+    on_status: StatusFn | None,
+) -> Transcript:
+    duration = len(samples) / SAMPLE_RATE
     s = get_settings()
-    plan = plan_asr()
 
     # loading the model, the audio treatment and speech detection report no progress (on the first
-    # run the model is also downloaded): log each step and honour Cancel between them
+    # run the model is also downloaded): say what is happening and honour Cancel between the steps
     def check_cancel() -> None:
         if should_cancel and should_cancel():
             raise Cancelled()
 
-    log.info("loading speech model %s (%s, %.0f s of audio)", plan.model, plan.device, duration)
+    log.info(
+        "loading speech model %s (%s, %s, %.0f s of audio)", plan.model, plan.device, plan.compute, duration
+    )
     t_start = time.monotonic()
-    model, name = load_model(plan.model)
+    model, name = load_model(plan.model, on_status, plan)
     log.info("speech model %s ready in %.0f s", name, time.monotonic() - t_start)
     check_cancel()
 
     # level / noise treatment for the recogniser only (the rendered audio is never touched)
+    report("Preparing the audio and finding where people speak…", on_status)
     signals = signals or analyze_audio(samples)
     asr_audio, enhancement = enhance_for_asr(samples, signals, s.asr_enhance)
     check_cancel()
@@ -368,6 +631,7 @@ def transcribe(
         sum(b - a for a, b in chunks),
     )
     check_cancel()
+    report(f"Recognising speech on the {device_label(plan.device)} ({name})", on_status)
 
     prompt = None
     if s.whisper_prompt and language in _PROMPTS:
@@ -482,6 +746,8 @@ def transcribe(
             "mode": plan.mode,
             "requested_model": plan.model,
             "model": name,
+            "device": plan.device,
+            "compute": plan.compute,
             "beam_size": plan.beam_size,
             "vad": plan.vad,
             "enhancement": enhancement,

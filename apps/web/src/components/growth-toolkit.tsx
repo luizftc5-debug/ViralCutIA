@@ -41,8 +41,8 @@ export function GrowthToolkit({ g }: { g: Growth }) {
           <div>
             <h4 className="text-[13px] text-faint">Thumbnail text ideas</h4>
             <ul className="mt-1 flex flex-wrap gap-2">
-              {g.thumbnail_text.map((t) => (
-                <li key={t} className="rounded border border-line px-2 py-1 font-display text-sm font-semibold">
+              {g.thumbnail_text.map((t, i) => (
+                <li key={`${i}-${t}`} className="rounded border border-line px-2 py-1 font-display text-sm font-semibold">
                   {t}
                 </li>
               ))}
@@ -78,8 +78,8 @@ export function GrowthToolkit({ g }: { g: Growth }) {
           <div>
             <h4 className="text-[13px] text-faint">Follow-up ideas (other strong moments of this video)</h4>
             <ul className="mt-1 list-disc pl-5">
-              {g.followups.map((f) => (
-                <li key={f}>{f}</li>
+              {g.followups.map((f, i) => (
+                <li key={`${i}-${f}`}>{f}</li>
               ))}
             </ul>
           </div>

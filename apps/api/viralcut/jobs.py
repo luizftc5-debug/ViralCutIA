@@ -150,8 +150,10 @@ class JobReporter:
         self.stage = stage
         self._stage_t0[stage] = time.monotonic()
 
+        started = utcnow().isoformat(timespec="seconds") + "Z"  # the page runs a clock from it
+
         def m(stages: dict) -> None:
-            stages[stage] = {"status": "active", "progress": 0.0}
+            stages[stage] = {"status": "active", "progress": 0.0, "started_at": started}
 
         self._update(m)
         self._last_write = time.monotonic()
@@ -167,6 +169,26 @@ class JobReporter:
         def m(stages: dict) -> None:
             cur = stages.get(stage, {"status": "active", "progress": 0.0})
             stages[stage] = {"status": "active", "progress": max(value, float(cur.get("progress", 0.0)))}
+            for keep in ("detail", "started_at"):  # what the page shows next to the bar
+                if cur.get(keep):
+                    stages[stage][keep] = cur[keep]
+
+        self._update(m)
+
+    def detail(self, text: str) -> None:
+        """One line under the active stage saying what is happening right now (a download,
+        loading a model). Also a heartbeat: long silent steps no longer look like a dead worker."""
+        stage = self.stage
+        if not stage:
+            return
+
+        def m(stages: dict) -> None:
+            cur = dict(stages.get(stage, {"status": "active", "progress": 0.0}))
+            if text:
+                cur["detail"] = text[:200]
+            else:
+                cur.pop("detail", None)
+            stages[stage] = cur
 
         self._update(m)
 

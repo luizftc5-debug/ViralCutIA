@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import get_settings
+from ..models import DownloadWatch, report
 from ..resources import active_plan
 from .audio import AudioSignals
 from .transcribe import Word
@@ -154,8 +155,15 @@ def load_aligner(language: str) -> Aligner | None:
             from huggingface_hub import hf_hub_download
 
             kw = {"cache_dir": str(s.models_dir)} if s.models_dir else {}
-            onnx = hf_hub_download(spec.repo, spec.onnx_file, **kw)
-            vocab_path = hf_hub_download(spec.repo, "vocab.json", **kw)
+            try:  # already on disk: no network, no "downloading" message
+                onnx = hf_hub_download(spec.repo, spec.onnx_file, local_files_only=True, **kw)
+                vocab_path = hf_hub_download(spec.repo, "vocab.json", local_files_only=True, **kw)
+            except Exception:
+                what = "Downloading the caption sync model, first time only"
+                with DownloadWatch(what, spec.repo, patterns=[spec.onnx_file, "vocab.json"]):
+                    onnx = hf_hub_download(spec.repo, spec.onnx_file, **kw)
+                    vocab_path = hf_hub_download(spec.repo, "vocab.json", **kw)
+                report("")
             import json
 
             vocab = json.loads(Path(vocab_path).read_text(encoding="utf-8"))
