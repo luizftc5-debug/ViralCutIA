@@ -2,6 +2,9 @@
 rem ViralCut: install or update the dependencies and rebuild the site. Run once after each update.
 setlocal
 set "ROOT=%~dp0.."
+rem download caches of pip and npm stay inside the project folder, not the user profile on C:
+set "PIP_CACHE_DIR=%ROOT%\.cache\pip"
+set "npm_config_cache=%ROOT%\.cache\npm"
 
 if not exist "%ROOT%\apps\api\.venv\Scripts\python.exe" (
   echo Creating the Python environment...

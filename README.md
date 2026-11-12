@@ -80,7 +80,7 @@ cd apps/web && npm install && npm run dev
 `scripts/dev.sh` is for Linux and macOS. On Windows, install once:
 
 1. **Python 3.11 to 3.13** (3.13 is the tested one; 3.15 does not work yet because `onnxruntime` has no wheels for it), **Node 20+** and **ffmpeg** (`winget install Gyan.FFmpeg`).
-2. Keep the project **outside OneDrive** (for example `C:\Dev\ViralCutIA`): the sync client locks the thousands of files that `pip` and `npm` create.
+2. Keep the project **outside OneDrive** (for example `E:\Dev\ViralCutIA`): the sync client locks the thousands of files that `pip` and `npm` create.
 3. In a terminal, from the project folder:
 
 ```bat

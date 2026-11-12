@@ -24,6 +24,15 @@ async def lifespan(app: FastAPI):
     if get_settings().embedded_worker:
         from ..worker.main import start_embedded
 
+        # uvicorn only configures its own loggers: without a handler the worker's progress
+        # ("processing job ...") never reaches the API window, which hides why videos wait
+        vc = logging.getLogger("viralcut")
+        if not vc.handlers:
+            h = logging.StreamHandler()
+            h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+            vc.addHandler(h)
+            vc.setLevel(logging.INFO)
+
         worker = start_embedded()
         log.info("embedded worker started")
     yield

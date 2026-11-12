@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -9,10 +11,15 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ASSETS_DIR = Path(__file__).parent / "assets"
+# apps/api: relative paths (data dir, .env) are anchored here, not to the folder the API or the
+# worker happens to be started from, so the whole install moves with the project folder
+API_ROOT = Path(__file__).resolve().parent.parent
+# the checkout root (holds apps/web) when running from source; None inside the Docker image
+REPO_ROOT: Path | None = API_ROOT.parent.parent if (API_ROOT.parent.parent / "apps" / "web").is_dir() else None
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="VIRALCUT_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="VIRALCUT_", env_file=(".env", str(API_ROOT / ".env")), extra="ignore")
 
     # --- storage / persistence
     data_dir: Path = Path("./data")
@@ -111,9 +118,29 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
+def _anchor(p: Path) -> Path:
+    return p if p.is_absolute() else (API_ROOT / p).resolve()
+
+
 @lru_cache
 def get_settings() -> Settings:
     s = Settings()
+    s.data_dir = _anchor(s.data_dir)
+    if s.models_dir is not None:
+        s.models_dir = _anchor(s.models_dir)
+    elif REPO_ROOT is not None:
+        # from source, downloaded AI models (~2 GB) live in <project>/models, never in the user
+        # profile on the system drive; Docker keeps its own HF_HOME (/models)
+        s.models_dir = REPO_ROOT / "models"
+    if s.models_dir is not None:
+        s.models_dir.mkdir(parents=True, exist_ok=True)
+        # any Hugging Face download not given an explicit folder lands here too
+        os.environ.setdefault("HF_HOME", str(s.models_dir / "hf"))
+    if REPO_ROOT is not None and not os.environ.get("VIRALCUT_KEEP_SYSTEM_TEMP"):
+        # scratch files (reframe passes, previews, ZIP exports) stay on the project's drive
+        tmp = s.data_dir / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        tempfile.tempdir = str(tmp)
     s.data_dir.mkdir(parents=True, exist_ok=True)
     s.jobs_dir.mkdir(parents=True, exist_ok=True)
     return s

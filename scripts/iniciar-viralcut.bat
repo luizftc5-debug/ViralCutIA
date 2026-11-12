@@ -15,6 +15,14 @@ if not exist "%ROOT%\apps\web\node_modules" (
   pause
   exit /b 1
 )
+rem without ffmpeg the worker cannot run and every video waits forever in the queue
+where ffmpeg >nul 2>nul
+if errorlevel 1 (
+  echo ffmpeg was not found. Install it with:  winget install Gyan.FFmpeg
+  echo Then close this window and open iniciar-viralcut.bat again.
+  pause
+  exit /b 1
+)
 if not exist "%ROOT%\apps\web\.next\BUILD_ID" (
   echo Building the site once ^(about a minute^)...
   pushd "%ROOT%\apps\web"
@@ -22,6 +30,8 @@ if not exist "%ROOT%\apps\web\.next\BUILD_ID" (
   popd
 )
 
+rem everything ViralCut writes stays inside this folder: data and temp files in apps\api\data,
+rem AI models in models\ (set by the API itself, see apps\api\viralcut\config.py)
 rem the worker runs inside the API; ECO / BALANCED / TURBO is chosen per video in the site
 set "VIRALCUT_EMBEDDED_WORKER=true"
 start "ViralCut API" /D "%ROOT%\apps\api" cmd /k .venv\Scripts\uvicorn viralcut.api.app:app --host 127.0.0.1 --port 8000
