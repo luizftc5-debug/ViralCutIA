@@ -2,28 +2,143 @@
 
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
-export type CaptionStyle = "viral_dynamic" | "high_retention" | "clean_editorial" | "dynamic_creator" | "gaming";
-export type FramingMode = "auto" | "face" | "split" | "blur" | "center";
+export type CaptionStyle =
+  | "auto"
+  | "viral_dynamic"
+  | "energy"
+  | "podcast"
+  | "kinetic"
+  | "clean_editorial"
+  | "gaming"
+  | "cinematic"
+  | "high_retention"
+  | "dynamic_creator";
+export type FramingMode = "auto" | "face" | "speaker" | "split" | "blur" | "center";
+export type VideoStyle =
+  | "auto"
+  | "viral"
+  | "podcast"
+  | "gaming"
+  | "cinematic"
+  | "educational"
+  | "reaction"
+  | "minimal"
+  | "storytime"
+  | "news";
+export type Intensity = "subtle" | "balanced" | "high";
+export type ContentType = "shorts" | "tiktok" | "reels" | "youtube" | "compilation";
+/** Creator Studio: per-editor settings keyed by the editor's command name (corte, 3d, tela-verde…). */
+export type EditorsConfig = Record<string, Record<string, unknown>>;
+
+export interface EditorControl {
+  name: string;
+  type: "number" | "bool" | "select" | "text" | "color" | "asset" | "proofs";
+  label: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+  kind?: "music" | "image" | "reference";
+  auto?: string;
+}
+
+export interface EditorInfo {
+  key: string;
+  command: string;
+  label: string;
+  description: string;
+  heavy: boolean;
+  controls: EditorControl[];
+}
+
+export interface PresetInfo {
+  key: string;
+  label: string;
+  description: string;
+  options: Partial<JobOptions> & { captions?: Partial<CaptionOptions> };
+  editors: EditorsConfig;
+}
+
+export interface Asset {
+  id: string;
+  kind: "music" | "image" | "reference";
+  name: string;
+  size: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+}
+
+export interface Growth {
+  titles: string[];
+  description: string;
+  keywords: string[];
+  hook: string;
+  thumbnail_text: string[];
+  category: string;
+  hashtags: string[];
+  platforms: Record<string, string>;
+  followups: string[];
+  versions_to_test: string[];
+  chapters?: { t: number; title: string }[];
+  note: string;
+}
+
+export interface JobSummary {
+  id: string;
+  status: Job["status"];
+  filename: string;
+  created_at: string;
+  media: Job["media"];
+  options: Partial<JobOptions>;
+  clip_count: number;
+  thumbnail: string | null;
+}
 
 export interface CaptionOptions {
   enabled: boolean;
   style: CaptionStyle;
   highlight_keywords: boolean;
-  size: "s" | "m" | "l";
+  size: "s" | "m" | "l" | "xl";
   position: "top" | "middle" | "bottom";
   color: string;
   font: "auto" | "inter" | "poppins" | "anton" | "dm_serif";
   animation: boolean;
+  // Caption Studio overrides (empty / "auto" / null = the style's own value)
+  text_color?: string;
+  keyword_color?: string;
+  weight?: "auto" | "medium" | "bold" | "heavy";
+  case?: "auto" | "upper" | "normal";
+  words_per_page?: number | null;
+  max_lines?: number | null;
+  line_spacing?: number | null;
+  outline?: number | null;
+  shadow?: number | null;
+  background?: "auto" | "none" | "box";
+  animation_type?: "auto" | "color" | "pop" | "box" | "reveal" | "none";
+  animation_intensity?: "subtle" | "normal" | "strong";
+  keyword_mode?: "auto" | "color" | "color_scale" | "off";
+  offset?: number;
 }
 
 export interface JobOptions {
   captions: CaptionOptions;
   language: string;
   clip_count: number | "auto";
-  duration: "auto" | "15-30" | "30-60" | "60-90";
-  platform: "universal" | "shorts" | "reels" | "tiktok";
-  aspect: "9:16";
-  style: "auto" | "dynamic" | "editorial" | "podcast" | "gaming";
+  duration: "auto" | "15-30" | "30-60" | "60-90" | "custom";
+  custom_min: number;
+  custom_max: number;
+  platform: "universal" | "shorts" | "reels" | "tiktok" | "youtube";
+  aspect: "9:16" | "16:9";
+  style: VideoStyle;
+  intensity: Intensity;
+  variations: number;
+  quality: "high" | "max";
+  performance: "auto" | "eco" | "balanced" | "turbo";
+  content_type: ContentType;
+  preset: string;
+  editors: EditorsConfig;
+  growth: boolean;
   framing: FramingMode;
   smart_zoom: boolean;
   review_transcript: boolean;
@@ -36,6 +151,14 @@ export interface Stage {
   label: string;
   status: "pending" | "active" | "done" | "skipped";
   progress: number;
+  elapsed_s?: number | null;
+}
+
+export interface StyleRecommendation {
+  style: VideoStyle;
+  label: string;
+  intensity: Intensity;
+  reasons: string[];
 }
 
 export interface Dimension {
@@ -80,6 +203,17 @@ export interface Clip {
   captions: Partial<CaptionOptions>;
   framing_mode: FramingMode;
   smart_trim: boolean;
+  style: VideoStyle | "dynamic" | "editorial";
+  intensity: Intensity;
+  quality: "high" | "max";
+  applied_style: { style: VideoStyle; label: string; chosen_by: "user" | "auto"; reason: string; intensity: Intensity } | null;
+  variant: { index: number; kind: string; label: string; why: string; of: string } | null;
+  recommendation: StyleRecommendation | null;
+  kind: "clip" | "compilation";
+  aspect: "9:16" | "16:9";
+  growth: Growth | null;
+  hook_first: { score: number; from: number; text: string; skipped_s: number } | null;
+  editors: EditorsConfig;
   layouts: string[];
   framing_notes: string[];
   has_captions_burned: boolean;
@@ -143,9 +277,22 @@ export interface LogEntry {
   message: string;
 }
 
+export interface PerformanceInfo {
+  profiles: { key: "eco" | "balanced" | "turbo"; threads: number; render_workers: number; nice: number; keep_asr_model: boolean }[];
+  default: "eco" | "balanced" | "turbo";
+  recommended: "eco" | "balanced" | "turbo";
+  reason: string;
+  hardware: { logical_cpus: number; physical_cpus: number; ram_gb: number | null; gpu: { name?: string; vram_gb?: number } };
+}
+
 export interface AppConfig {
   limits: { max_upload_mb: number; max_duration_s: number; formats: string[]; retention_hours: number };
   caption_styles: { key: CaptionStyle; label: string; description: string; accent: string }[];
+  editors: EditorInfo[];
+  presets: PresetInfo[];
+  content_types: ContentType[];
+  video_styles: { key: VideoStyle; label: string; description: string; caption: CaptionStyle; framing: FramingMode; best_for: string[] }[];
+  performance: PerformanceInfo;
   caption_fonts: { key: CaptionOptions["font"]; label: string }[];
   engine: { transcription: string; narrative_analysis: string; llm_enabled: boolean; min_score: number };
 }
@@ -199,7 +346,38 @@ export const api = {
   resume: (id: string) => request<Job>(`/api/jobs/${id}/resume`, { method: "POST" }),
   updateClip: (jobId: string, clipId: string, body: ClipUpdate) =>
     request<Clip>(`/api/jobs/${jobId}/clips/${clipId}`, { method: "PATCH", ...json(body) }),
+  jobs: () => request<{ jobs: JobSummary[] }>("/api/jobs"),
+  assets: (jobId: string) => request<{ assets: Asset[] }>(`/api/jobs/${jobId}/assets`),
+  uploadAsset: async (jobId: string, kind: Asset["kind"], file: File): Promise<Asset> => {
+    const res = await fetch(`${API_URL}/api/jobs/${jobId}/assets?kind=${kind}&filename=${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+    if (!res.ok) {
+      let detail = `Upload failed (${res.status}).`;
+      try {
+        const b = (await res.json()) as { detail?: unknown };
+        if (typeof b.detail === "string") detail = b.detail;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(detail, res.status);
+    }
+    return (await res.json()) as Asset;
+  },
+  /** JPEG rendered by the export engine itself (same layout code, same libass). */
+  captionPreview: async (body: CaptionPreviewRequest, signal?: AbortSignal): Promise<Blob> => {
+    const res = await fetch(`${API_URL}/api/caption-preview`, { method: "POST", signal, ...json(body) });
+    if (!res.ok) throw new ApiError(res.status === 429 ? "Preview busy" : "Preview failed", res.status);
+    return res.blob();
+  },
 };
+
+export interface CaptionPreviewRequest {
+  captions: CaptionOptions;
+  platform?: JobOptions["platform"];
+  text?: string;
+  language?: string;
+  job_id?: string;
+  clip_id?: string;
+}
 
 export interface TranscriptWord {
   index: number;
@@ -228,6 +406,10 @@ export interface ClipUpdate {
   captions?: CaptionOptions;
   framing_mode?: FramingMode;
   smart_trim?: boolean;
+  style?: VideoStyle;
+  intensity?: Intensity;
+  quality?: "high" | "max";
+  editors?: EditorsConfig;
   page_edits?: { index: number; text: string }[];
 }
 
@@ -282,9 +464,19 @@ export const DEFAULT_OPTIONS: JobOptions = {
   language: "auto",
   clip_count: "auto",
   duration: "auto",
+  custom_min: 20,
+  custom_max: 45,
   platform: "universal",
   aspect: "9:16",
   style: "auto",
+  intensity: "balanced",
+  variations: 1,
+  quality: "high",
+  performance: "auto",
+  content_type: "shorts",
+  preset: "",
+  editors: {},
+  growth: true,
   framing: "auto",
   smart_zoom: true,
   review_transcript: false,

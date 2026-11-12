@@ -40,17 +40,26 @@ def decode_audio(
         "-f",
         "f32le",
     ]
-    chunks: list[bytes] = []
-    expected = max(1.0, duration * SAMPLE_RATE * 4)
-    got = 0
+    # Samples are written straight into one preallocated array (grown only if the container
+    # under-reports its duration), instead of collecting chunks, joining them and copying the
+    # result: peak memory is one copy of the audio instead of three (~0.7 GB saved per hour).
+    expected_n = max(SAMPLE_RATE, int(duration * SAMPLE_RATE) + SAMPLE_RATE)
+    out = np.empty(expected_n, dtype=np.float32)
+    n = 0
+    tail = b""
     for buf in read_pipe(args, chunk_size=SAMPLE_RATE * 4 * 10, exact=False, should_cancel=should_cancel):
-        chunks.append(buf)
-        got += len(buf)
+        if tail:
+            buf = tail + buf
+        usable = len(buf) - len(buf) % 4
+        tail = buf[usable:]
+        k = usable // 4
+        if n + k > len(out):
+            out = np.resize(out, max(n + k, int(len(out) * 1.25)))
+        out[n : n + k] = np.frombuffer(buf, dtype=np.float32, count=k)
+        n += k
         if on_progress:
-            on_progress(min(1.0, got / expected))
-    raw = b"".join(chunks)
-    raw = raw[: len(raw) - (len(raw) % 4)]
-    return np.frombuffer(raw, dtype=np.float32).copy()
+            on_progress(min(1.0, n / expected_n))
+    return out[:n].copy() if n < len(out) * 0.9 else out[:n]
 
 
 @dataclass

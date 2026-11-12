@@ -20,13 +20,16 @@ No system can guarantee virality, and this one does not claim to: see
 | Selection | Sentence-aligned candidates, Hook Detection Engine (7 hook types), six-dimension Viral Potential Score with an explanation, temporal and semantic de-duplication, minimum-score cut-off |
 | Optional LLM | With an Anthropic API key, Claude re-rates shortlisted moments and writes titles/captions grounded in the transcript. Without it the engine is heuristic and says so |
 | Reframing | YuNet face tracking per shot, smoothed crop path, split screen for two speakers, blurred-backdrop layout, vertical sources kept as they are |
+| Video styles | Ten presets (**Automatic AI**, Viral Fast-Paced, Podcast Clips, Gaming Highlights, Cinematic Storytelling, Educational / Authority, Reaction / Entertainment, Minimal Premium, Storytime, News / Commentary) that set real parameters: pause trimming, punch-in amount and spacing, jump-cut handling (hard cut, quick punch, softened join), default framing and caption design, speech treatment. Intensity **Subtle / Balanced / High Energy**. A per-clip style recommendation with its reasons. Up to 3 versions per clip (hook-first, alternate style, alternate pacing) from one analysis. Visual formats: smart auto, full-screen vertical, speaker focus, split-screen, blurred background. Export quality High / Maximum |
 | Editing decisions | Content profile from evidence (podcast, gaming, education, entertainment, storytelling), eased punch-in zoom on words the speaker really stresses (face-tracked clips only), pause trimming per profile, leading disfluencies dropped. Every decision is stored with its reason |
 | Trimming | Shortens pauses only where the audio is actually silent; keeps a beat after questions |
-| Captions | Five presets (**Viral Dynamic**, **Creator High Retention**, **Premium Minimal**, **Gaming / Entertainment**, Dynamic Creator), aligned per-word timing, captions leave with the speech, keyword emphasis, size/position/colour/typeface, platform safe areas (verified by rasterising the worst case), captions placed in the blurred band of letterboxed footage, accents, burned in or off (`Add subtitles? yes/no`), SRT sidecar |
+| Captions | Nine presets (Bold Dynamic, High Energy, Podcast Premium, Kinetic Typography, Minimal Editorial, Gaming Impact, Cinematic, Classic Viral, Highlight Box) plus **Caption Studio** (weight, case, colours, words on screen, lines, spacing, outline, shadow, background panel, animation type and strength, keyword behaviour, vertical nudge) with a **live preview rendered by the export engine itself**, aligned per-word timing, captions leave with the speech, keyword emphasis, size/position/colour/typeface, platform safe areas (verified by rasterising the worst case), captions placed in the blurred band of letterboxed footage, accents, burned in or off (`Add subtitles? yes/no`), SRT sidecar |
 | Rendering | One ffmpeg pass per clip: H.264 High + AAC, 1080×1920 (720×1280 for low-resolution sources; the native source crop is reported, never presented as higher resolution), source frame rate up to 60 fps, BT.709 signalled, VBV-capped, faststart, **two-pass EBU R128 loudness to −14 LUFS / −1.5 dBTP** with only the speech treatments the measurements justify |
 | QA | Codec, resolution, orientation, frame rate, duration, A/V sync, faststart, full decode, non-silent audio, **integrated loudness, true peak, 48 kHz stereo and square pixels** verified for every file with ffprobe/ffmpeg |
 | Studio | Preview (the rendered MP4, so preview and export are identical), score breakdown, move start/end, fix caption text, change caption style and framing, re-render, download MP4/SRT, export all as ZIP. **Optional transcript review before rendering**: pause after the clips are chosen, correct words everywhere (find and replace), continue |
-| Jobs | Persistent queue with real per-stage progress, logs, cancel, controlled retry, crash recovery, automatic deletion after the retention period |
+| Jobs | Persistent queue with real per-stage progress and timings, logs, cancel, controlled retry, crash recovery, automatic deletion after the retention period |
+| Creator Studio | 13 editors (/corte, /tomada, /ganchos, /legenda, /lettering, /animacao, /3d, /trilha, /tela-verde, /prova, /texto-atras, /referencia, /enquadramento), 12 presets, one-click generation, YouTube long-form 16:9 with chapters, ranking compilations, Growth Toolkit, project history. [Details](docs/CREATOR_STUDIO.md) |
+| Performance | **ECO / BALANCED / TURBO** resource profiles detected from the worker's own hardware (cores, cgroup quota, RAM, GPU), thread budgets for ffmpeg / Whisper / aligner, lower process priority, bounded parallel rendering, content-addressed cache of transcripts and analysis, per-clip cache for studio re-renders. [Measured before/after](docs/PERFORMANCE.md) |
 
 ## Quick start
 
@@ -71,6 +74,8 @@ cd apps/web && npm install && npm run dev
 ```
 
 ### Windows (no Docker)
+
+**Guia em português, passo a passo: [docs/COMECAR.md](docs/COMECAR.md)** (`scripts\atualizar-viralcut.bat` instala/atualiza, `scripts\iniciar-viralcut.bat` abre).
 
 `scripts/dev.sh` is for Linux and macOS. On Windows, install once:
 

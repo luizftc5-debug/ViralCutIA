@@ -141,14 +141,44 @@ word-by-word phrases), **Premium Minimal** (`clean_editorial`: quiet reveal, res
 the earlier **Dynamic Creator** highlight block. The studio preview is the rendered MP4 itself, so
 preview and export cannot differ.
 
+## Video styles and variations
+
+`pipeline/styles.py` maps each video style to the knobs the editing engine already had: longest
+kept pause, punch-in amplitude / spacing / ramp / budget, how jump cuts are handled (`cut`,
+`punch`: the incoming shot starts ~6–9 % closer and eases back, every other cut, crop layouts
+only; `smooth`: 25 ms audio crossfade and no effects), default framing and caption design, and the
+speech treatment (`natural`, `voice`, `punchy`: when the leveller engages and whether a +2 dB
+presence lift is added). Intensity scales those values within hard limits. `auto` takes the
+detected content profile's own tuned values and the matching style's transition, audio and
+captions. Every clip stores the applied parameters and the reason (`framing.edit.style`) and a
+recommendation computed from its measured signals (`clip.edit.recommendation`).
+
+`pipeline/variations.py` adds up to two versions per selected clip as extra clip rows
+(`clip.edit.variant`): a hook-first cut when a later sentence measures as a clearly stronger
+hook, a different style, or a different intensity. They reuse the job's transcript and signals,
+and the per-clip cache when their in/out points match.
+
+## Resources and caching
+
+`resources.py` detects the worker machine (CPU affinity and cgroup quota, RAM, CUDA GPU via
+`nvidia-smi`) and turns the ECO / BALANCED / TURBO profile into limits: ffmpeg decoder, filter and
+encoder threads, Whisper and aligner threads, clips rendered at a time, child-process priority,
+and whether Whisper stays loaded. A job can pick its profile; `GET /api/config` reports the
+server's hardware and recommendation. `cache.py` keys transcripts and audio/visual signals by a
+BLAKE2b hash of the file contents plus every parameter that changes them, and expires entries
+with the upload retention. The per-clip `ClipCache` in the orchestrator memoises alignment, face
+tracking and loudness pass 1 so a studio edit only redoes what it changed. Measurements:
+[PERFORMANCE.md](PERFORMANCE.md).
+
 ## Storage layout
 
 ```
 data/
 ├── viralcut.db                  # SQLite (development)
+├── cache/                       # content-addressed transcripts and signals (expire with retention)
 └── jobs/<job id>/
     ├── source.<ext>             # the upload, stored under a fixed name
-    ├── analysis/                # transcript.json, signals.npz, meta.json
+    ├── analysis/                # transcript.json, signals.npz, meta.json, clips/ (per-clip cache)
     └── clips/<clip id>/v<N>.mp4 | .srt | .jpg
 ```
 

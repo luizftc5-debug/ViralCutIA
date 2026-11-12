@@ -115,3 +115,14 @@ def worker():
     from viralcut.worker.main import Worker
 
     return Worker()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_content_cache():
+    """Each test starts with an empty content-addressed cache (tests that need reuse do it themselves)."""
+    import shutil
+
+    from viralcut.config import get_settings
+
+    shutil.rmtree(get_settings().cache_dir, ignore_errors=True)
+    yield

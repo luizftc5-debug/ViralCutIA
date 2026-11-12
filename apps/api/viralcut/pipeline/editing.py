@@ -368,7 +368,7 @@ def classify_content(
     if wpm < 135 and scores["storytelling"] > 0.15:
         scores["storytelling"] += 0.1  # a measured pace carries a narrative
 
-    forced = _STYLE_TO_PROFILE.get(user_style)
+    forced = _STYLE_TO_PROFILE.get(user_style) or (user_style if user_style in _PROFILE_PARAMS else None)
     best = max(scores, key=lambda k: scores[k])
     ranked = sorted(scores.values(), reverse=True)
     margin = ranked[0] - (ranked[1] if len(ranked) > 1 else 0.0)

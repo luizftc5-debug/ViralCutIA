@@ -26,7 +26,8 @@ export function useJob(id: string) {
         if (!alive) return;
         setJob(next);
         setError(null);
-        if (isBusy(next)) timer = setTimeout(tick, 1000);
+        // a background tab does not need second-by-second updates: poll 5x less often
+        if (isBusy(next)) timer = setTimeout(tick, document.visibilityState === "hidden" ? 5000 : 1000);
       } catch (e) {
         if (!alive) return;
         const notFound = e instanceof ApiError && e.status === 404;
@@ -35,9 +36,17 @@ export function useJob(id: string) {
       }
     };
     void tick();
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && alive) {
+        clearTimeout(timer);
+        void tick(); // catch up immediately when the user comes back
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       alive = false;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [id, nonce]);
 

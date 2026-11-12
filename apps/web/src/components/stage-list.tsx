@@ -32,6 +32,7 @@ export function StageList({ job }: { job: Job }) {
             </span>
             <span className="tnum text-sm text-muted">
               {active && s.key !== "ready" ? `${Math.round(s.progress * 100)}%` : ""}
+              {s.status === "done" && s.elapsed_s != null && s.elapsed_s >= 0.1 ? `${s.elapsed_s < 60 ? s.elapsed_s.toFixed(1) + " s" : Math.round(s.elapsed_s / 60) + " min"}` : ""}
               <span className="sr-only">{s.status === "done" ? "done" : s.status === "pending" ? "waiting" : ""}</span>
             </span>
             {active && s.key !== "ready" && (

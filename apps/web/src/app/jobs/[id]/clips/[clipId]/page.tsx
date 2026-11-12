@@ -9,7 +9,20 @@ import { CaptionControls } from "@/components/caption-controls";
 import { ScoreNumber } from "@/components/score";
 import { SiteHeader } from "@/components/site-header";
 import { Button, buttonClass, Notice, ProgressBar, Segmented, Toggle } from "@/components/ui";
-import { api, ApiError, type CaptionOptions, type Clip, type ClipUpdate, DEFAULT_CAPTIONS, type FramingMode, mediaUrl } from "@/lib/api";
+import dynamic from "next/dynamic";
+
+import { VideoStylePicker } from "@/components/video-style-picker";
+import { api, ApiError, type AppConfig, type CaptionOptions, type Clip, type ClipUpdate, DEFAULT_CAPTIONS, type EditorsConfig, type FramingMode, type Intensity, mediaUrl, type VideoStyle } from "@/lib/api";
+
+const EditorsPanel = dynamic(() => import("@/components/creator-studio").then((m) => m.EditorsPanel), {
+  loading: () => <p className="text-sm text-faint">Loading editors…</p>,
+});
+
+function mergeEditors(base: EditorsConfig, over: EditorsConfig): EditorsConfig {
+  const out: EditorsConfig = {};
+  for (const k of new Set([...Object.keys(base), ...Object.keys(over)])) out[k] = { ...(base[k] ?? {}), ...(over[k] ?? {}) };
+  return out;
+}
 import { layoutName, timecode } from "@/lib/format";
 
 interface Draft {
@@ -18,16 +31,26 @@ interface Draft {
   captions: CaptionOptions;
   framing: FramingMode;
   smartTrim: boolean;
+  style: VideoStyle;
+  intensity: Intensity;
+  quality: "high" | "max";
+  editors: EditorsConfig;
   pages: Record<number, string>;
 }
 
-function draftFrom(clip: Clip): Draft {
+const normStyle = (s: Clip["style"]): VideoStyle => (s === "dynamic" ? "viral" : s === "editorial" ? "minimal" : s);
+
+function draftFrom(clip: Clip, jobEditors: EditorsConfig = {}): Draft {
   return {
     start: clip.start,
     end: clip.end,
     captions: { ...DEFAULT_CAPTIONS, ...clip.captions },
     framing: clip.framing_mode,
     smartTrim: clip.smart_trim,
+    style: normStyle(clip.style ?? "auto"),
+    intensity: clip.intensity ?? "balanced",
+    quality: clip.quality ?? "high",
+    editors: mergeEditors(jobEditors, clip.editors ?? {}),
     pages: {},
   };
 }
@@ -72,6 +95,19 @@ export default function ClipStudioPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const [nonce, setNonce] = useState(0);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [jobEditors, setJobEditors] = useState<EditorsConfig>({});
+  const jobEditorsRef = useRef<EditorsConfig>({});
+  useEffect(() => {
+    api.config().then(setConfig).catch(() => undefined);
+    api
+      .job(id)
+      .then((j) => {
+        jobEditorsRef.current = j.options.editors ?? {};
+        setJobEditors(jobEditorsRef.current);
+      })
+      .catch(() => undefined);
+  }, [id]);
 
   // Load the clip, and keep polling while a render is queued or running.
   useEffect(() => {
@@ -87,7 +123,7 @@ export default function ClipStudioPage() {
         // (re)seed the form whenever a new rendered version arrives; a failed render keeps your edits
         if (!busy && next.version !== loadedVersion.current) {
           loadedVersion.current = next.version;
-          setDraft(draftFrom(next));
+          setDraft(draftFrom(next, jobEditorsRef.current));
         }
         if (busy) timer = setTimeout(tick, 1000);
       } catch (e) {
@@ -121,12 +157,16 @@ export default function ClipStudioPage() {
     if (JSON.stringify(original) !== JSON.stringify(draft.captions)) body.captions = draft.captions;
     if (draft.framing !== clip.framing_mode) body.framing_mode = draft.framing;
     if (draft.smartTrim !== clip.smart_trim) body.smart_trim = draft.smartTrim;
+    if (draft.style !== normStyle(clip.style ?? "auto")) body.style = draft.style;
+    if (draft.intensity !== (clip.intensity ?? "balanced")) body.intensity = draft.intensity;
+    if (draft.quality !== (clip.quality ?? "high")) body.quality = draft.quality;
+    if (JSON.stringify(draft.editors) !== JSON.stringify(mergeEditors(jobEditors, clip.editors ?? {}))) body.editors = draft.editors;
     const edits = Object.entries(draft.pages)
       .map(([index, text]) => ({ index: Number(index), text }))
       .filter((e) => (clip.pages?.[e.index]?.text ?? "") !== e.text);
     if (edits.length) body.page_edits = edits;
     return Object.keys(body).length ? body : null;
-  }, [clip, draft]);
+  }, [clip, draft, jobEditors]);
 
   const lengthProblem = draft && (draft.end - draft.start < 3 ? "A clip needs to be at least 3 seconds long." : draft.end - draft.start > 180 ? "A clip can be at most 3 minutes long." : "");
 
@@ -190,7 +230,7 @@ export default function ClipStudioPage() {
         <div className="mt-6 grid gap-x-14 gap-y-10 lg:grid-cols-[300px_minmax(0,1fr)]">
           {/* preview: always the last rendered file, so what you see is what you download */}
           <aside className="lg:sticky lg:top-24 lg:self-start">
-            <div className="relative aspect-[9/16] w-full max-w-[300px] overflow-hidden rounded-(--radius-frame) border border-line bg-panel">
+            <div className={`relative ${clip.aspect === "16:9" ? "aspect-video" : "aspect-[9/16]"} w-full max-w-[300px] overflow-hidden rounded-(--radius-frame) border border-line bg-panel`}>
               {clip.urls ? (
                 <video ref={videoRef} key={clip.version} controls playsInline preload="metadata" poster={mediaUrl(clip.urls.thumbnail)} src={mediaUrl(clip.urls.video)} className="size-full object-cover" aria-label="Rendered clip preview" />
               ) : (
@@ -208,7 +248,8 @@ export default function ClipStudioPage() {
             <div className="mt-4 flex items-end justify-between">
               <div>
                 <p className="text-sm text-muted">
-                  Clip {clip.rank}, version {clip.version}
+                  Clip {clip.rank}
+                  {clip.variant ? ` · ${clip.variant.label}` : ""}, version {clip.version}
                 </p>
                 <ScoreNumber clip={clip} size="md" />
               </div>
@@ -261,6 +302,66 @@ export default function ClipStudioPage() {
               </div>
             </section>
 
+            <section aria-labelledby="style-h" className="space-y-6 border-t border-line pt-10">
+              <h2 id="style-h" className="text-2xl font-semibold">
+                Video style
+              </h2>
+              {clip.applied_style && (
+                <p className="text-sm text-muted">
+                  This version: <span className="text-fg">{clip.applied_style.label}</span> ({clip.applied_style.reason}).
+                </p>
+              )}
+              {clip.recommendation && (
+                <div className="rounded-xl border border-line bg-panel p-4 text-sm">
+                  <p>
+                    Recommended for this clip: <span className="font-medium text-amber">{clip.recommendation.label}</span>, {clip.recommendation.intensity} intensity
+                  </p>
+                  <p className="mt-1 text-[13px] text-faint">Why: {clip.recommendation.reasons.join("; ")}. A recommendation from measured signals, not a promise of views.</p>
+                  {(draft.style !== clip.recommendation.style || draft.intensity !== clip.recommendation.intensity) && (
+                    <Button size="sm" className="mt-3" onClick={() => setDraft((d) => (d && clip.recommendation ? { ...d, style: clip.recommendation.style, intensity: clip.recommendation.intensity } : d))}>
+                      Use the recommendation
+                    </Button>
+                  )}
+                </div>
+              )}
+              <VideoStylePicker value={draft.style} onChange={(v) => setD("style", v)} styles={config?.video_styles} />
+              <Segmented
+                label="Editing intensity"
+                value={draft.intensity}
+                onChange={(v) => setD("intensity", v)}
+                options={[
+                  { value: "subtle", label: "Subtle" },
+                  { value: "balanced", label: "Balanced" },
+                  { value: "high", label: "High energy" },
+                ]}
+              />
+              <Segmented
+                label="Export quality"
+                value={draft.quality}
+                onChange={(v) => setD("quality", v)}
+                options={[
+                  { value: "high", label: "High quality" },
+                  { value: "max", label: "Maximum quality" },
+                ]}
+              />
+              <p className="text-[13px] text-faint">Changing only the captions or the style reuses this clip’s alignment, face tracking and loudness measurement, so the re-render is quicker.</p>
+            </section>
+
+            <section aria-labelledby="editors-h" className="space-y-4 border-t border-line pt-10">
+              <h2 id="editors-h" className="text-2xl font-semibold">
+                Editors for this clip
+              </h2>
+              <p className="text-sm text-muted">Changes apply to this clip only. Analysis, alignment and face tracking are reused, so only the render runs again.</p>
+              <EditorsPanel
+                editors={draft.editors}
+                onChange={(e) => setD("editors", e)}
+                info={config?.editors}
+                jobId={id}
+                captionsOn={draft.captions.enabled}
+                onCaptions={(v) => setD("captions", { ...draft.captions, enabled: v })}
+              />
+            </section>
+
             <section aria-labelledby="framing-h" className="space-y-4 border-t border-line pt-10">
               <h2 id="framing-h" className="text-2xl font-semibold">
                 Framing
@@ -272,6 +373,7 @@ export default function ClipStudioPage() {
                 options={[
                   { value: "auto", label: "Automatic" },
                   { value: "face", label: "Follow the speaker" },
+                  { value: "speaker", label: "Speaker focus" },
                   { value: "split", label: "Split screen" },
                   { value: "blur", label: "Blurred backdrop" },
                   { value: "center", label: "Centre crop" },
@@ -295,7 +397,14 @@ export default function ClipStudioPage() {
                   <div className="max-w-xl border-y border-line">
                     <Toggle label="Burn captions into the video" hint="Off keeps the picture clean. The SRT file is available either way." checked={draft.captions.enabled} onChange={(v) => setD("captions", { ...draft.captions, enabled: v })} />
                   </div>
-                  {draft.captions.enabled && <CaptionControls value={draft.captions} onChange={(c) => setD("captions", c)} />}
+                  {draft.captions.enabled && (
+                    <CaptionControls
+                      value={draft.captions}
+                      onChange={(c) => setD("captions", c)}
+                      fonts={config?.caption_fonts}
+                      preview={{ jobId: id, clipId, language: clip.language, autoStyle: config?.video_styles?.find((v) => v.key === (clip.applied_style?.style ?? draft.style))?.caption }}
+                    />
+                  )}
 
                   <div>
                     <h3 className="text-lg font-semibold">Fix the words</h3>
@@ -332,7 +441,7 @@ export default function ClipStudioPage() {
                 </p>
                 <div className="flex w-full gap-3 sm:w-auto">
                   {changes && !rendering && (
-                    <Button variant="ghost" onClick={() => setDraft(draftFrom(clip))}>
+                    <Button variant="ghost" onClick={() => setDraft(draftFrom(clip, jobEditors))}>
                       Discard
                     </Button>
                   )}

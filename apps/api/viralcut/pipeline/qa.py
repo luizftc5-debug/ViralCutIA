@@ -11,6 +11,7 @@ import struct
 from fractions import Fraction
 from pathlib import Path
 
+from ..resources import active_plan
 from .ffmpeg import run_capture
 
 
@@ -80,7 +81,10 @@ def verify_clip(
     checks["video_codec_h264"] = video.get("codec_name") == "h264"
     checks["pixel_format_yuv420p"] = video.get("pix_fmt") == "yuv420p"
     checks["resolution"] = (w, h) == (expected_width, expected_height)
-    checks["vertical_9_16"] = h > w and abs(w / h - 9 / 16) < 0.01
+    if expected_width > expected_height:
+        checks["landscape_16_9"] = w > h and abs(w / h - 16 / 9) < 0.01
+    else:
+        checks["vertical_9_16"] = h > w and abs(w / h - 9 / 16) < 0.01
     checks["frame_rate"] = abs(float(fps) - float(Fraction(expected_fps))) < 0.05
     checks["duration"] = abs(v_dur - expected_duration) <= max(0.12, 3 * frame)
     checks["audio_stream_aac"] = audio is not None and audio.get("codec_name") == "aac"
@@ -89,7 +93,7 @@ def verify_clip(
 
     # full decode: catches truncated/corrupt streams, and measures loudness of the result
     dec = run_capture(
-        ["ffmpeg", "-hide_banner", "-nostdin", "-v", "info", "-xerror", "-i", str(path), "-map", "0:v:0", "-map", "0:a:0?", "-af", "volumedetect,ebur128=peak=true", "-f", "null", "-"],
+        ["ffmpeg", "-hide_banner", "-nostdin", "-v", "info", "-xerror", "-threads", str(active_plan().threads), "-i", str(path), "-map", "0:v:0", "-map", "0:a:0?", "-af", "volumedetect,ebur128=peak=true", "-f", "null", "-"],
         timeout=600,
     )  # fmt: skip
     err = dec.stderr.decode("utf-8", "replace")

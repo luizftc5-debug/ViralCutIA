@@ -21,7 +21,8 @@ PATCH …/clips/{cid}       studio edit                → clip (status "queued"
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/health` | Liveness: `{"status":"ok","version":"0.1.0"}` |
-| GET | `/api/config` | Upload limits, caption styles and fonts, and which engines are active |
+| GET | `/api/config` | Upload limits, caption styles and fonts, video styles, the processing server's hardware and resource profiles, and which engines are active |
+| POST | `/api/caption-preview` | JPEG of a caption page rendered by the export engine (same layout code, same libass). Body: `{"captions": {...}, "platform": "tiktok", "text": "", "job_id": null, "clip_id": null}`; with a job/clip the background is a frame of that video. 429 when two previews are already rendering |
 
 `engine.narrative_analysis` is `"heuristic"` or `"llm:<model>"`, so a client can tell users which
 analysis they are getting before they upload.
@@ -73,16 +74,21 @@ Nothing is kept from a rejected upload.
 
 | Field | Values |
 |---|---|
-| `captions.style` | `viral_dynamic` (A), `high_retention` (B, Creator High Retention), `clean_editorial` (C, Premium Minimal), `gaming` (D), `dynamic_creator` |
-| `captions.size` / `position` | `s` `m` `l` / `top` `middle` `bottom` |
-| `captions.color` | `#RRGGBB` accent, or empty for the style default |
+| `captions.style` | `auto` (the caption design of the clip's video style), `viral_dynamic` (Bold Dynamic), `energy` (High Energy), `podcast` (Podcast Premium), `kinetic` (Kinetic Typography), `clean_editorial` (Minimal Editorial), `gaming` (Gaming Impact), `cinematic` (Cinematic), `high_retention` (Classic Viral), `dynamic_creator` (Highlight Box) |
+| `captions.size` / `position` | `s` `m` `l` `xl` / `top` `middle` `bottom` |
+| `captions.color` | `#RRGGBB` highlight colour of the spoken word, or empty for the style default |
+| Caption Studio | `text_color`, `keyword_color` (`#RRGGBB` or empty), `weight` (`auto` `medium` `bold` `heavy`), `case` (`auto` `upper` `normal`), `words_per_page` (1–8), `max_lines` (1–3), `line_spacing` (0.8–1.6), `outline` (0–16), `shadow` (0–12), `background` (`auto` `none` `box`), `animation_type` (`auto` `color` `pop` `box` `reveal` `none`), `animation_intensity` (`subtle` `normal` `strong`), `keyword_mode` (`auto` `color` `color_scale` `off`), `offset` (−0.2…0.2 of the frame height, clamped to the safe area). `null`/empty/`auto` = the style's value |
 | `captions.font` | `auto`, `inter`, `poppins`, `anton`, `dm_serif` |
 | `language` | `auto` or a language code (`en`, `pt`, `es`, …) |
 | `clip_count` | `"auto"` or 1–20 (a ceiling, not a quota) |
-| `duration` | `auto` (18–75 s), `15-30`, `30-60`, `60-90` |
+| `duration` | `auto` (18–75 s), `15-30`, `30-60`, `60-90`, `custom` (with `custom_min` / `custom_max`, 5–180 s, at least 5 s apart) |
 | `platform` | `universal`, `shorts`, `reels`, `tiktok` (caption safe areas) |
-| `style` | `auto`, `dynamic`, `editorial`, `podcast`, `gaming` (pause trimming and default framing) |
-| `framing` | `auto`, `face`, `split`, `blur`, `center` |
+| `style` | Video style: `auto`, `viral`, `podcast`, `gaming`, `cinematic`, `educational`, `reaction`, `minimal`, `storytime`, `news` (legacy `dynamic` = `viral`, `editorial` = `minimal`). Sets pacing, punch-ins, jump-cut handling, default framing and caption design, and speech treatment (see `pipeline/styles.py`) |
+| `intensity` | `subtle`, `balanced` (default), `high` |
+| `variations` | 1–3 versions per selected clip (hook-first, alternate style, alternate pacing), from the same analysis |
+| `quality` | `high` (CRF 18, profile preset) or `max` (CRF 16, `slow`) |
+| `performance` | `auto` (server default), `eco`, `balanced`, `turbo`: resource profile of the worker for this job |
+| `framing` | `auto`, `face` (full-screen vertical), `speaker` (speaker focus), `split`, `blur`, `center` |
 | `smart_zoom` | `true` (default): eased punch-ins on stressed words, only on face-tracked clips |
 | `review_transcript` | `false` (default). `true` pauses the job in status `review` after clip selection, until `POST /jobs/{id}/resume` |
 | `glossary` | Comma-separated names and terms the recogniser should prefer (max 400 characters) |
@@ -189,11 +195,18 @@ or `none`.
   "captions": {"enabled": true, "style": "clean_editorial", "position": "top"},
   "framing_mode": "blur",
   "smart_trim": false,
+  "style": "cinematic",
+  "intensity": "subtle",
+  "quality": "max",
   "page_edits": [{"index": 0, "text": "Corrected caption text"}]
 }
 ```
 
-All fields are optional. `page_edits[].index` refers to `pages` of the version currently
+All fields are optional. A clip also returns `applied_style` (the concrete style used and why),
+`recommendation` (`{style, label, intensity, reasons}` from the clip's measured signals) and, for an
+extra version, `variant` (`{index, kind, label, why, of}`). Edits that leave the in/out points and
+words alone (captions, style, quality) reuse the clip's cached alignment, face tracking and
+loudness measurement. `page_edits[].index` refers to `pages` of the version currently
 rendered; an empty `text` removes that caption. A clip must stay between 3 and 180 seconds. The
 response has `status: "queued"`; poll the clip until it is `ready` (its `version` increases) or
 shows an `error`. If the new render fails, the previous version is kept.

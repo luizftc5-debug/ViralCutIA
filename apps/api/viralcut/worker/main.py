@@ -9,11 +9,13 @@ import socket
 import threading
 import time
 
+from .. import cache
 from ..config import get_settings
 from ..db import get_engine
 from ..jobs import claim_clip, claim_job, purge_expired, requeue_stale
 from ..pipeline.ffmpeg import require_binaries
 from ..pipeline.orchestrator import rerender_clip, run_job
+from ..resources import active_plan
 
 log = logging.getLogger("viralcut.worker")
 
@@ -35,8 +37,12 @@ class Worker:
         try:
             stale = requeue_stale()
             purged = purge_expired()
-            if stale or purged:
-                log.info("maintenance: %d stale job(s) recovered, %d expired job(s) purged", stale, purged)
+            cached = cache.purge()  # cached transcripts expire with the uploads they came from
+            if stale or purged or cached:
+                log.info(
+                    "maintenance: %d stale job(s) recovered, %d expired job(s) purged, %d cache file(s) removed",
+                    stale, purged, cached,
+                )  # fmt: skip
         except Exception:
             log.exception("maintenance failed")
 
@@ -82,6 +88,12 @@ def start_embedded() -> Worker:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    plan = active_plan()
+    if plan.nice > 0 and hasattr(os, "nice"):
+        try:  # a standalone worker yields the CPU to the user's own applications (ECO / BALANCED)
+            os.nice(plan.nice)
+        except OSError:
+            pass
     worker = Worker()
     signal.signal(signal.SIGTERM, worker.stop)
     signal.signal(signal.SIGINT, worker.stop)

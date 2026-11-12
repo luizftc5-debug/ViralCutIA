@@ -4,32 +4,43 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import traceback
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 
+from .. import cache
 from ..config import get_settings
 from ..db import Clip, Job, session_scope, utcnow
 from ..jobs import JobReporter, add_log
 from ..options import CaptionOptions, JobOptions
+from ..resources import active_plan, use_profile
 from ..security import FAMILY_DEMUXER, sniff_container
 from ..storage import LocalStorage, get_storage
 from . import captions as cap
-from . import llm
+from . import growth, llm
 from .align import align_words, refine_with_energy
 from .audio import AudioSignals, analyze_audio, decode_audio, silent_signals
-from .candidates import signal_candidates, speech_candidates
+from .candidates import long_candidates, signal_candidates, speech_candidates
 from .copywriting import extractive_copy
 from .editing import ContentProfile, Zoom, classify_content, plan_zooms, tighten_opening
+from .editors import EditorsConfig
+from .effects import drop_words, merge_ass
+from .effects import subtract as subtract_intervals
 from .ffmpeg import Cancelled, FFmpegError
 from .probe import MediaInfo, ProbeError, probe
 from .qa import QAError, verify_clip
 from .reframe import FramingPlan, Shot, plan_framing
 from .render import (
+    RenderExtras,
+    add_punch_transitions,
     assign_zooms,
     build_segments,
+    composite_clip,
+    jump_cuts,
     make_thumbnail,
     output_size,
     plan_audio_polish,
@@ -39,9 +50,16 @@ from .render import (
 )
 from .scoring import AnalysisContext, score_signal, score_speech
 from .selection import auto_count, select
+from .studio import edit_cuts, overlay_events, render_extras
+from .styles import STYLES as VIDEO_STYLES
+from .styles import EditParams, edit_params
+from .styles import recommend as recommend_style
+from .styles import resolve as resolve_style
 from .text import build_sentences, norm
-from .transcribe import Transcript, TranscriptionUnavailable, Word, transcribe
+from .transcribe import Transcript, TranscriptionUnavailable, Word, release_models, transcribe
+from .transcribe import cache_key as transcribe_cache_key
 from .trimming import plan_keeps
+from .variations import hook_first, plan_variations
 from .visual import VisualSignals, analyze_visual
 
 log = logging.getLogger(__name__)
@@ -114,6 +132,44 @@ def effective_words(start: float, end: float, text_edits: dict, transcript: Tran
 # --------------------------------------------------------------------------- per-clip steps
 
 
+class ClipCache:
+    """Per-job memo of a clip's expensive, deterministic steps (alignment, face tracking, loudness).
+
+    Keys hash every input of the step, so a studio edit that does not touch those inputs (caption
+    style, colours, font, burn-in on/off...) reuses them, and any edit that does (new in/out
+    points, corrected words, another framing mode) recomputes them. Files live in the job's
+    analysis directory and are deleted with the job.
+    """
+
+    def __init__(self, directory: Path | None) -> None:
+        self.dir = directory
+        if directory is not None:
+            directory.mkdir(parents=True, exist_ok=True)
+
+    def get(self, *parts) -> dict | None:  # noqa: ANN002
+        if self.dir is None:
+            return None
+        try:
+            return json.loads((self.dir / f"{cache.make_key(*parts)}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def put(self, value: dict, *parts) -> None:  # noqa: ANN002
+        if self.dir is None:
+            return
+        try:
+            (self.dir / f"{cache.make_key(*parts)}.json").write_text(json.dumps(value), encoding="utf-8")
+        except OSError:
+            pass
+
+
+NO_CACHE = ClipCache(None)
+
+
+def _words_sig(words: list[Word]) -> list:
+    return [(w.text, round(w.start, 3), round(w.end, 3)) for w in words]
+
+
 @dataclass
 class ClipPlan:
     clip_id: str
@@ -131,14 +187,57 @@ class ClipPlan:
     duration: float = 0.0
     ass_path: Path | None = None
     version: int = 1
+    style: str = "auto"  # video style requested for this clip (pipeline/styles.py)
+    intensity: str = "balanced"
+    params: EditParams | None = None  # concrete editing parameters applied
+    quality: str = "high"
+    cap_opts: CaptionOptions | None = None  # this clip's caption options (variations may differ)
+    aspect: str = "9:16"
+    editors: EditorsConfig = field(default_factory=EditorsConfig)
+    hook_text: str = ""  # opening line measured by the Hook Detection Engine (/ganchos)
+    title: str = ""  # best title (/lettering default text)
+    rank_label: str = ""  # "#3" in a ranking compilation
+    reference: dict | None = None  # /referencia: adaptation measured from the reference video
+    behind_path: Path | None = None  # /texto-atras ASS layer
 
 
-def step_align(cp: ClipPlan, art: Artifacts, source: Path, should_cancel=None) -> dict:  # noqa: ANN001
+def step_align(
+    cp: ClipPlan,
+    art: Artifacts,
+    source: Path,
+    should_cancel=None,
+    memo: ClipCache = NO_CACHE,  # noqa: ANN001
+) -> dict:
     """Re-time the clip's words to the waveform (CTC forced alignment, then loudness refinement).
 
     Whisper's native timestamps lead the audio by ~0.2 s on average; captions make that visible.
     Failure here must never block rendering: the words then keep Whisper's timing.
     """
+    key = (
+        "align-v1",
+        cp.start,
+        cp.end,
+        _words_sig(cp.words),
+        art.transcript.language,
+        get_settings().align_mode,
+    )
+    hit = memo.get(*key)
+    if hit is not None:
+        cp.words = [Word(w[0], w[1], w[2], w[3]) for w in hit["words"]]
+        cp.align, cp.start = hit["info"], hit["start"]
+        cp.edit_notes.extend(hit["notes"])
+        return cp.align
+    notes_before = len(cp.edit_notes)
+    info = _align(cp, art, source, should_cancel)
+    memo.put(
+        {"words": [(w.text, w.start, w.end, w.prob) for w in cp.words], "info": info, "start": cp.start,
+         "notes": cp.edit_notes[notes_before:]},
+        *key,
+    )  # fmt: skip
+    return info
+
+
+def _align(cp: ClipPlan, art: Artifacts, source: Path, should_cancel=None) -> dict:  # noqa: ANN001
     info: dict = {"method": "whisper", "note": "no words"}
     if not cp.words:
         cp.align = info
@@ -169,11 +268,27 @@ def step_align(cp: ClipPlan, art: Artifacts, source: Path, should_cancel=None) -
     return info
 
 
+def _recommendation(cp: ClipPlan, art: Artifacts):  # noqa: ANN202
+    """Style recommendation for a framed clip, from its measured signals (applied to a Clip row)."""
+    dur = max(1.0, cp.end - cp.start)
+    wpm = 60.0 * len(cp.words) / dur
+    motion_pct = art.visual.motion_percentile(art.visual.motion_level(cp.start, cp.end))
+    face = cp.plan.face_ratio if cp.plan else 0.0
+    name = cp.profile.name if cp.profile else "general"
+
+    def apply(clip: Clip) -> dict:
+        dims = (clip.dimensions or {}).get("values", {})
+        return recommend_style(dims, name, wpm, motion_pct, face)
+
+    return apply
+
+
 def framing_json(cp: ClipPlan) -> dict:
     out = cp.plan.to_dict()
     if cp.align is not None:
         out["align"] = cp.align
     out["edit"] = {
+        "style": cp.params.to_dict() if cp.params else None,
         "profile": cp.profile.to_dict() if cp.profile else None,
         "zooms": [z.to_dict() for z in cp.zooms],
         "notes": cp.edit_notes,
@@ -194,14 +309,33 @@ def step_framing(
     *,
     user_style: str = "auto",
     smart_zoom: bool = True,
+    memo: ClipCache = NO_CACHE,
 ) -> None:  # noqa: ANN001
     """Decide the clip's reframing, pacing and punch-ins from what is actually in it."""
     from .render import output_fps
 
-    cp.plan = plan_framing(
-        source, art.family, art.media, cp.start, cp.end, framing_mode, on_progress, should_cancel
-    )
+    fkey = ("frame-v1", round(cp.start, 4), round(cp.end, 4), framing_mode)
+    hit = memo.get(*fkey)
+    if cp.aspect == "16:9":
+        # landscape output: a landscape source is kept whole (punch-ins allowed); a vertical one
+        # sits over its blurred copy. No face detection is needed, so nothing is decoded here.
+        landscape = art.media.width >= art.media.height
+        layout = {"type": "fit", "full": True} if landscape else {"type": "blur"}
+        cp.plan = FramingPlan([Shot(0.0, cp.end - cp.start, layout)], mode="16:9", notes=["16:9 output"])
+        if on_progress:
+            on_progress(1.0)
+    elif hit is not None:
+        cp.plan = FramingPlan.from_dict(hit)
+        if on_progress:
+            on_progress(1.0)
+    else:
+        cp.plan = plan_framing(
+            source, art.family, art.media, cp.start, cp.end, framing_mode, on_progress, should_cancel
+        )
+        memo.put(cp.plan.to_dict(), *fkey)
     split = any(s.layout["type"] == "split" for s in cp.plan.shots)
+    style = resolve_style(cp.style if cp.style != "auto" else user_style)
+    forced = VIDEO_STYLES[style].profile if style != "auto" else None
     cp.profile = classify_content(
         cp.words,
         art.transcript.language,
@@ -211,13 +345,39 @@ def step_framing(
         cp.end,
         face_ratio=cp.plan.face_ratio,
         split_layout=split,
-        user_style=user_style,
+        user_style=forced or "auto",
     )
-    # an explicit editing style keeps its own pause limit; "auto" follows the detected content
-    pause = max_pause if user_style != "auto" else cp.profile.max_pause
+    # the video style (chosen, or picked from the detected content) sets pacing, moves and audio
+    intensity = (cp.reference or {}).get("applied", {}).get("intensity") or cp.intensity
+    cp.params = edit_params(
+        style, intensity, cp.profile.name, cp.profile.evidence, (cp.profile.max_pause, cp.profile.zoom)
+    )
+    ed = cp.editors
+    if cp.reference:  # /referencia: the measured editing of the reference video
+        ap = cp.reference.get("applied", {})
+        if "max_pause" in ap:
+            cp.params.max_pause = ap["max_pause"]
+        if "transition" in ap:
+            cp.params.transition = ap["transition"]
+        if "audio" in ap:
+            cp.params.audio = ap["audio"]
+        if ap.get("zoom") and cp.params.zoom.get("allowed"):
+            cp.params.zoom.update(ap["zoom"])
+        cp.params.reason += "; adapted to the reference video"
+        cp.edit_notes.append("/referencia: " + "; ".join(cp.reference.get("notes", [])[:3]))
+    if ed.corte.enabled and ed.corte.max_pause is not None and cp.params.max_pause is not None:
+        cp.params.max_pause = ed.corte.max_pause
+    if not ed.corte.enabled:
+        cp.params.max_pause = None  # /corte off: no pause is removed
+    cp.profile.max_pause, cp.profile.zoom = cp.params.max_pause, dict(cp.params.zoom)
+    pause = cp.params.max_pause
     keeps = plan_keeps(cp.words, cp.start, cp.end, art.audio, pause if smart_trim else None)
+    cuts = edit_cuts(cp.words, art.transcript.language, ed, cp.edit_notes)
+    if cuts:
+        keeps = subtract_intervals(keeps, cuts) or keeps
+        cp.words = drop_words(cp.words, cuts)
     fps = output_fps(art.media)
-    cp.segments = build_segments(keeps, cp.plan.shots, cp.start, fps)
+    cp.segments = build_segments(keeps, cp.plan.shots, cp.start, fps)  # noqa: E501
     if not cp.segments:
         cp.segments = build_segments(
             [(cp.start, cp.end)], [Shot(0.0, cp.end - cp.start, cp.plan.shots[0].layout)], cp.start, fps
@@ -237,7 +397,16 @@ def step_framing(
         enabled=smart_zoom,
     )
     cp.zooms = assign_zooms(cp.segments, fps, zooms)
-    cp.audio_polish = plan_audio_polish(art.audio, cp.start, cp.end)
+    if cp.params.transition == "punch" and smart_zoom:
+        punches = add_punch_transitions(cp.segments, fps, amp=max(0.05, cp.params.zoom.get("amp", 0.06)))
+        if punches:
+            cp.edit_notes.append(f"{punches} jump cut(s) covered with a quick punch-in")
+    cp.audio_polish = plan_audio_polish(art.audio, cp.start, cp.end, cp.params.audio)
+    if cp.params.transition == "smooth":
+        cp.audio_polish.join_fade = 0.025  # softer joins: no audible edge where a pause was removed
+        cuts = len(jump_cuts(cp.segments))
+        if cuts:
+            cp.edit_notes.append(f"{cuts} join(s) softened (25 ms audio crossfade, no punch effects)")
     removed = (cp.end - cp.start) - cp.duration
     if removed > 0.05:
         cp.edit_notes.append(
@@ -250,10 +419,15 @@ def step_framing(
 def step_captions(
     cp: ClipPlan, art: Artifacts, storage: LocalStorage, job_id: str, opts: CaptionOptions, platform: str
 ) -> list[dict]:
-    """Write the SRT sidecar (whenever there is speech) and the ASS file (only when burn-in is on)."""
-    if not cp.out_words:
-        return []
-    ow, oh = output_size(art.media)
+    """Write the SRT sidecar (whenever there is speech) and the ASS file: captions (when burn-in
+    is on) plus the overlay editors (/lettering, /ganchos, /animacao), and the /texto-atras layer."""
+    ow, oh = output_size(art.media, cp.aspect)
+    if opts.style == "auto":  # the caption design that belongs to the clip's video style
+        opts = opts.model_copy(update={"style": cp.params.caption if cp.params else "high_retention"})
+    if cp.reference and cp.reference.get("applied", {}).get("caption_position"):
+        opts = opts.model_copy(update={"position": cp.reference["applied"]["caption_position"]})
+    if not cp.editors.legenda.enabled:
+        opts = opts.model_copy(update={"enabled": False})
     if (
         opts.position == "bottom"
         and cp.plan is not None
@@ -262,26 +436,43 @@ def step_captions(
         # in a split screen the lower third is someone's face: captions sit on the seam instead
         opts = opts.model_copy(update={"position": "middle"})
         cp.plan.notes.append("captions moved to the middle so they do not cover the lower speaker")
-    pages = cap.paginate(cp.out_words, opts, cp.duration, set(art.keywords[:10]))
-    if not pages:
-        return []
-    center_y = None
-    if cp.plan is not None and cp.plan.shots and all(s.layout["type"] == "blur" for s in cp.plan.shots):
-        # letterboxed picture: put captions in the blurred band, clear of the gameplay / screen content
-        center_y = cap.blur_band_anchor(
-            opts.position, platform, art.media.width, art.media.height, ow, oh, opts.style, opts.size
+    accent = opts.color or cap.effective_spec(opts).accent
+    over, behind = overlay_events(cp, cp.editors, ow, oh, art.keywords, accent, opts.position == "top")
+    pages = cap.paginate(cp.out_words, opts, cp.duration, set(art.keywords[:10])) if cp.out_words else []
+    ass: str | None = None
+    if pages:
+        center_y = None
+        if cp.plan is not None and cp.plan.shots and all(s.layout["type"] == "blur" for s in cp.plan.shots):
+            # letterboxed picture: put captions in the blurred band, clear of the gameplay / screen content
+            center_y = cap.blur_band_anchor(
+                opts.position,
+                platform,
+                art.media.width,
+                art.media.height,
+                ow,
+                oh,
+                opts.style,
+                opts.size,
+                opts,
+            )
+            if center_y is not None:
+                cp.plan.notes.append("captions placed in the blurred band so they do not cover the picture")
+        ass = cap.build_ass(pages, opts, platform, ow, oh, center_y)  # also lays out the SRT lines
+        storage.clip_file(job_id, cp.clip_id, cp.version, "srt").write_text(
+            cap.build_srt(pages), encoding="utf-8"
         )
-        if center_y is not None:
-            cp.plan.notes.append("captions placed in the blurred band so they do not cover the picture")
-    ass = cap.build_ass(
-        pages, opts, platform, ow, oh, center_y
-    )  # also computes the line layout used by the SRT
-    storage.clip_file(job_id, cp.clip_id, cp.version, "srt").write_text(
-        cap.build_srt(pages), encoding="utf-8"
-    )
-    if opts.enabled:
+    if (opts.enabled and ass) or over:
         cp.ass_path = storage.clip_file(job_id, cp.clip_id, cp.version, "ass")
-        cp.ass_path.write_text(ass, encoding="utf-8")
+        cp.ass_path.write_text(merge_ass(ass if opts.enabled else None, over, ow, oh), encoding="utf-8")
+    if behind:
+        cp.behind_path = (
+            cp.ass_path.with_name(f"v{cp.version}.behind.ass")
+            if cp.ass_path
+            else storage.clip_file(job_id, cp.clip_id, cp.version, "ass").with_name(
+                f"v{cp.version}.behind.ass"
+            )
+        )
+        cp.behind_path.write_text(merge_ass(None, behind, ow, oh), encoding="utf-8")
     return [p.to_dict() for p in pages]
 
 
@@ -293,12 +484,19 @@ def step_render(
     job_id: str,
     on_progress=None,
     should_cancel=None,
+    memo: ClipCache = NO_CACHE,
 ) -> dict:  # noqa: ANN001
     out = storage.clip_file(job_id, cp.clip_id, cp.version, "video")
-    params = render_clip(
-        source, art.family, art.media, cp.start, cp.segments, out, cp.ass_path, on_progress, should_cancel,
-        cp.audio_polish,
-    )  # fmt: skip
+    extras = render_extras(cp, art, cp.editors, storage.job_dir(job_id), source)
+    if cp.editors.needs_matte:
+        params = _render_with_matte(
+            cp, art, source, out, extras or RenderExtras(), on_progress, should_cancel, memo
+        )
+    else:
+        params = render_clip(
+            source, art.family, art.media, cp.start, cp.segments, out, cp.ass_path, on_progress, should_cancel,
+            cp.audio_polish, quality=cp.quality, loudness_memo=memo, aspect=cp.aspect, extras=extras,
+        )  # fmt: skip
     report = verify_clip(
         out,
         expected_width=params["width"],
@@ -321,7 +519,89 @@ def step_render(
         pass  # a missing poster frame is cosmetic
     if cp.ass_path is not None:
         cp.ass_path.unlink(missing_ok=True)
+    if cp.behind_path is not None:
+        cp.behind_path.unlink(missing_ok=True)
     return report
+
+
+def _render_with_matte(cp, art, source, out, extras, on_progress, should_cancel, memo) -> dict:  # noqa: ANN001
+    """Two passes for the AI-matte editors: near-lossless base -> person matte -> composite."""
+    from .segmentation import MattingUnavailable, matte_video
+
+    base = out.with_name(out.stem + ".base.mp4")
+    matte = out.with_name(out.stem + ".matte.mkv")
+    prog = on_progress or (lambda p: None)
+    try:
+        params = render_clip(
+            source, art.family, art.media, cp.start, cp.segments, base, None, lambda p: prog(0.35 * p),
+            should_cancel, cp.audio_polish, quality="intermediate", loudness_memo=memo, aspect=cp.aspect,
+        )  # fmt: skip
+        try:
+            info = matte_video(
+                base, matte, params["duration"], lambda p: prog(0.35 + 0.35 * p), should_cancel
+            )
+        except MattingUnavailable as exc:
+            # the rest of the edit still renders; only the matte effects are skipped (and said so)
+            cp.edit_notes.append(
+                f"AI matting unavailable ({exc}); rendered without background/behind-text effects"
+            )
+            extras.behind_ass, extras.background = None, None
+            return render_clip(
+                source, art.family, art.media, cp.start, cp.segments, out, cp.ass_path, on_progress, should_cancel,
+                cp.audio_polish, quality=cp.quality, loudness_memo=memo, aspect=cp.aspect, extras=extras,
+            )  # fmt: skip
+        if info["person_coverage"] < 0.03:
+            # nobody to cut out: compositing would replace the whole picture with background
+            cp.edit_notes.append(
+                "AI matte found no person in this clip; background and behind-text effects skipped"
+            )
+            extras.behind_ass, extras.background = None, None
+            base.unlink(missing_ok=True)
+            return render_clip(
+                source, art.family, art.media, cp.start, cp.segments, out, cp.ass_path, on_progress, should_cancel,
+                cp.audio_polish, quality=cp.quality, loudness_memo=memo, aspect=cp.aspect, extras=extras,
+            )  # fmt: skip
+        cp.edit_notes.append(
+            f"AI matte: {info['frames']} frames at {info['fps']:.0f} fps ({info['size']}), person in {info['person_coverage']:.0%} of the frame"
+        )
+        if cp.behind_path is not None:
+            if info.get("person_top") is not None:
+                # place the word so the head overlaps only its lower third
+                from .effects import behind_text_events
+                from .studio import _keyword
+
+                ta = cp.editors.texto_atras
+                text = ta.text or _keyword(cp.words, art.keywords)
+                ow, oh = params["width"], params["height"]
+                fs_frac = 300.0 * cap.scale_for(ow, oh) * ta.size / oh
+                y = max(0.08, info["person_top"] - fs_frac * 0.25)
+                cp.behind_path.write_text(
+                    merge_ass(
+                        None,
+                        behind_text_events(text, params["duration"], ow, oh, ta.color, ta.size, y),
+                        ow,
+                        oh,
+                    ),
+                    encoding="utf-8",
+                )
+            extras.behind_ass = cp.behind_path.name
+        if not (cp.editors.tela_verde.enabled and cp.editors.tela_verde.mode == "ai"):
+            extras.background = None  # /texto-atras alone keeps the real background
+        composite_clip(
+            base, matte, out, Fraction(params["fps"]), params["width"], params["height"], params["duration"], extras,
+            cp.ass_path, quality=cp.quality, color_media=art.media, on_progress=lambda p: prog(0.7 + 0.3 * p),
+            should_cancel=should_cancel,
+        )  # fmt: skip
+        return {
+            **params,
+            "quality": cp.quality,
+            "preset": active_plan().x264_preset,
+            "passes": 2,
+            "matte": info,
+        }
+    finally:
+        base.unlink(missing_ok=True)
+        matte.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- full job
@@ -332,8 +612,16 @@ def run_job(job_id: str) -> None:
     settings = get_settings()
     storage = get_storage()
     rep = JobReporter(job_id)
+    with session_scope() as s:
+        job = s.get(Job, job_id)
+        profile = ((job.options or {}).get("performance") if job else None) or "auto"
     try:
-        _run(job_id, rep, storage)
+        with use_profile(profile) as plan:
+            rep.log(
+                f"Resource profile: {plan.profile.upper()} ({plan.threads} threads per task, "
+                f"{plan.render_workers} render at a time; recommended for this machine: {plan.recommended.upper()})."
+            )
+            _run(job_id, rep, storage)
     except Cancelled:
         _finish(job_id, "canceled", "")
         rep.log("Job canceled.", "warn")
@@ -391,6 +679,7 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
             return
         options = JobOptions.model_validate(job.options or {})
         source = storage.source_path(job_id, job.source_ext)
+        stored_media = dict(job.media or {})
         resume = (job.analysis or {}).get("review") == "resume"
         if not resume:
             # a retry starts clean
@@ -408,7 +697,10 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
     family = _family(source)
     if family not in FAMILY_DEMUXER:
         raise UserFacingError("The file is not a supported video container.")
-    media = probe(source, family)
+    try:  # probed once at upload; probing again would only repeat the same ffprobe call
+        media = MediaInfo.from_dict(stored_media) if stored_media.get("duration") else probe(source, family)
+    except (TypeError, KeyError, ValueError):
+        media = probe(source, family)
     rep.log(
         f"Source: {media.width}x{media.height} @ {media.fps_float:.2f} fps, {media.duration:.1f}s, "
         f"video={media.video_codec}, audio={media.audio_codec or 'none'}"
@@ -416,14 +708,32 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
     warnings: list[str] = []
     if media.is_hdr:
         warnings.append("HDR source: converted to SDR with a basic tone-mapping.")
+    # Expensive results are cached by the *content* of the file: the same video processed again
+    # (a retry, other clip lengths or styles, a duplicate upload) skips decoding and recognition.
+    digest = cache.file_digest(source)
+    lang = None if options.language == "auto" else options.language
+    sig_key = cache.make_key("signals-v1", digest)
+    cached_sig = cache.get_npz("signals", sig_key)
+    asr_key = transcribe_cache_key(digest, lang, options.glossary) if media.has_audio else ""
+    cached_tr = cache.get_json("transcripts", asr_key) if asr_key else None
     samples = None
-    if media.has_audio:
-        samples = decode_audio(source, family, media.duration, rep.sub(0.0, 0.35), cancelled)
-        audio = analyze_audio(samples)
-    else:
-        audio = silent_signals(media.duration)
+    if not media.has_audio:
         warnings.append("The video has no audio track: clips were selected from visual signals only.")
-    visual = analyze_visual(source, family, media.duration, rep.sub(0.35, 1.0), cancelled)
+    if cached_sig is not None:
+        audio = AudioSignals.from_arrays(cached_sig["rms_db"], cached_sig["audio_meta"])
+        visual = VisualSignals.from_arrays(cached_sig["motion"], cached_sig["cuts"])
+        rep.log("Reused the audio and visual analysis of this exact file (content hash match).")
+    else:
+        if media.has_audio:
+            samples = decode_audio(source, family, media.duration, rep.sub(0.0, 0.35), cancelled)
+            audio = analyze_audio(samples)
+        else:
+            audio = silent_signals(media.duration)
+        visual = analyze_visual(source, family, media.duration, rep.sub(0.35, 1.0), cancelled)
+        a, v = audio.to_arrays(), visual.to_arrays()
+        cache.put_npz(
+            "signals", sig_key, rms_db=a["rms_db"], audio_meta=a["meta"], motion=v["motion"], cuts=v["cuts"]
+        )
     rep.log(
         f"Audio: speech level {audio.speech_db:.0f} dBFS, noise floor {audio.noise_floor_db:.0f} dBFS. Visual: {len(visual.cuts)} shot changes."
     )
@@ -432,31 +742,46 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
     # ---- 2. transcribing --------------------------------------------------------------
     rep.start("transcribing")
     transcript = Transcript()
-    if samples is not None and len(samples):
-        try:
-            lang = None if options.language == "auto" else options.language
-            transcript = transcribe(samples, lang, rep.progress, cancelled, audio, options.glossary)
-            q = transcript.quality
-            rep.log(
-                f"Transcribed {len(transcript.words)} words, language={transcript.language or '?'} "
-                f"({transcript.engine}, {q.get('mode', '?')} mode)."
-            )
-            if q.get("dropped_segments"):
+    if cached_tr is not None:
+        transcript = Transcript.from_dict(cached_tr)
+        rep.log(
+            f"Reused the transcript of this exact file ({len(transcript.words)} words, {transcript.engine}): "
+            "same audio and recognition settings, so recognition was not repeated."
+        )
+        rep.finish()
+    elif media.has_audio:
+        if samples is None:
+            samples = decode_audio(source, family, media.duration, None, cancelled)
+        if len(samples):
+            try:
+                transcript = transcribe(samples, lang, rep.progress, cancelled, audio, options.glossary)
+                q = transcript.quality
                 rep.log(
-                    f"Discarded {len(q['dropped_segments'])} segment(s) with no evidence of speech "
-                    "(music, noise or silence), so no words were invented."
+                    f"Transcribed {len(transcript.words)} words, language={transcript.language or '?'} "
+                    f"({transcript.engine}, {q.get('mode', '?')} mode)."
                 )
-            if q.get("enhancement", {}).get("applied"):
-                rep.log("Audio prepared for recognition: " + "; ".join(q["enhancement"]["applied"]) + ".")
-            if q.get("requested_model") and q.get("model") != q.get("requested_model"):
+                if q.get("dropped_segments"):
+                    rep.log(
+                        f"Discarded {len(q['dropped_segments'])} segment(s) with no evidence of speech "
+                        "(music, noise or silence), so no words were invented."
+                    )
+                if q.get("enhancement", {}).get("applied"):
+                    rep.log("Audio prepared for recognition: " + "; ".join(q["enhancement"]["applied"]) + ".")
+                if q.get("requested_model") and q.get("model") != q.get("requested_model"):
+                    warnings.append(
+                        f"Speech model '{q['requested_model']}' was unavailable; a smaller model ({transcript.engine}) was used, so accuracy is lower."
+                    )
+                elif transcript.words:
+                    # only results of the requested model are reused (a fallback is never cached)
+                    cache.put_json("transcripts", asr_key, transcript.to_dict())
+            except TranscriptionUnavailable as exc:
+                rep.log(f"Transcription unavailable: {exc}", "warn")
                 warnings.append(
-                    f"Speech model '{q['requested_model']}' was unavailable; a smaller model ({transcript.engine}) was used, so accuracy is lower."
+                    "Speech recognition was unavailable: clips were selected from audio/visual signals only, without captions."
                 )
-        except TranscriptionUnavailable as exc:
-            rep.log(f"Transcription unavailable: {exc}", "warn")
-            warnings.append(
-                "Speech recognition was unavailable: clips were selected from audio/visual signals only, without captions."
-            )
+            finally:
+                if not active_plan().keep_asr_model:
+                    release_models()  # ECO: give the model's memory back before rendering
         rep.finish()
     else:
         rep.finish(skipped=True)
@@ -465,10 +790,17 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
     # ---- 3. discovering ---------------------------------------------------------------
     rep.start("discovering")
     min_d, max_d = options.duration_range
+    longform = options.content_type == "youtube"
+    if longform and options.duration != "custom":
+        # long-form default: 3 to 15 minutes (the whole video when it is shorter)
+        min_d, max_d = min(180.0, media.duration * 0.5), min(900.0, media.duration)
     sentences = build_sentences(transcript.words, transcript.language)
     ctx = AnalysisContext.build(transcript.words, sentences, transcript.language, audio, visual, media)
     has_speech = len(transcript.words) >= MIN_SPEECH_WORDS and bool(sentences)
-    if has_speech:
+    if has_speech and longform:
+        cands = long_candidates(sentences, transcript.words, media.duration, min_d, max_d)
+        mode = "speech"
+    elif has_speech:
         cands = speech_candidates(sentences, transcript.words, media.duration, min_d, max_d)
         mode = "speech"
         if transcript.language[:2] not in ("en", "pt"):
@@ -498,10 +830,14 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
     # ---- 4. ranking -------------------------------------------------------------------
     rep.start("ranking")
     want = auto_count(media.duration) if options.clip_count == "auto" else int(options.clip_count)
+    if options.content_type == "youtube" and options.clip_count == "auto":
+        want = 1  # one long-form edit unless more were asked for
     want = min(want, settings.max_clips)
     min_score = options.min_score if options.min_score is not None else settings.min_score
     if mode == "signals" and options.min_score is None:
         min_score = min(min_score, 30.0)  # signal-only scores are capped by the neutral text dimensions
+    if options.content_type == "youtube" and options.min_score is None:
+        min_score = 0.0  # a long-form edit of the user's own video is always produced
     llm_info: dict = {"used": False}
     if settings.llm_active and mode == "speech":
         shortlist = select(
@@ -544,12 +880,10 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
                 copy_source = "extractive"
             else:
                 titles, caption, copy_source = [], "", "none"
-            clip = Clip(
+            common = dict(
                 job_id=job_id,
                 rank=rank,
                 status="pending",
-                start=round(c.start, 3),
-                end=round(c.end, 3),
                 score=c.score,
                 dimensions={"values": c.dims, "details": c.details, "engine": engine, "weights": ctx.weights},
                 explanation=c.explanation,
@@ -559,15 +893,83 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
                 copy_source=copy_source,
                 language=transcript.language,
                 transcript=c.text,
-                captions=options.captions.model_dump(),
                 framing_mode=options.default_framing,
                 smart_trim=options.trim_max_pause is not None,
                 version=1,
             )
+            ed = options.editors
+            c_start, studio = (
+                c.start,
+                {
+                    "hook_text": (c.hook or {}).get("text", ""),
+                    "title": titles[0] if titles else "",
+                    "rank_label": f"#{rank}" if options.content_type == "compilation" else "",
+                    "aspect": options.output_aspect,
+                },
+            )
+            if ed.ganchos.enabled and ed.ganchos.start_on_hook:
+                hf = hook_first(c, ctx, min_d)
+                if hf is not None:  # /ganchos: start on the measurably stronger opening
+                    c_start = hf[0]
+                    studio["hook_first"] = {**hf[2], "skipped_s": round(hf[0] - c.start, 2)}
+                    studio["hook_text"] = hf[2]["text"]
+            if options.growth:
+                others = [
+                    o
+                    for o in cands
+                    if o.kind == "speech"
+                    and o not in chosen
+                    and min(o.end, c.end) - max(o.start, c.start) <= 0
+                ]
+                others.sort(key=lambda o: -o.score)
+                studio["growth"] = growth.build(
+                    text=c.text, titles=titles, caption=caption, hook_text=studio["hook_text"],
+                    language=transcript.language, global_keywords=ctx.tfidf.keywords, category="",
+                    content_type=options.content_type,
+                    followups=[o.text.split(".")[0][:120] for o in others[:3]],
+                    variants=[v.label for v in plan_variations(c, ctx, options.variations, options.style, options.intensity, min_d)],
+                )  # fmt: skip
+            clip = Clip(
+                **common,
+                start=round(c_start, 3),
+                end=round(c.end, 3),
+                captions=options.captions.model_dump(),
+                edit={
+                    "style": options.style,
+                    "intensity": options.intensity,
+                    "quality": options.quality,
+                    **studio,
+                },
+            )
             s.add(clip)
             s.flush()
-            words = effective_words(c.start, c.end, {}, transcript)
-            plans.append(ClipPlan(clip.id, c.start, c.end, words))
+            words = effective_words(c_start, c.end, {}, transcript)
+            plans.append(
+                ClipPlan(clip.id, c_start, c.end, words, style=options.style, intensity=options.intensity,
+                         quality=options.quality, cap_opts=options.captions, aspect=options.output_aspect,
+                         editors=ed, hook_text=studio["hook_text"], title=studio["title"], rank_label=studio["rank_label"])
+            )  # fmt: skip
+            # alternative versions of the same moment: no new analysis, only another edit
+            for var in plan_variations(c, ctx, options.variations, options.style, options.intensity, min_d):
+                vcap = options.captions
+                if var.caption_style and vcap.style != "auto":
+                    vcap = vcap.model_copy(update={"style": var.caption_style})
+                vclip = Clip(
+                    **common,
+                    start=round(var.start, 3),
+                    end=round(var.end, 3),
+                    captions=vcap.model_dump(),
+                    edit={"style": var.style, "intensity": var.intensity, "quality": options.quality,
+                          "variant": {**var.to_dict(), "of": clip.id}, "hook_text": studio["hook_text"],
+                          "title": studio["title"], "aspect": options.output_aspect},
+                )  # fmt: skip
+                s.add(vclip)
+                s.flush()
+                plans.append(
+                    ClipPlan(vclip.id, var.start, var.end, effective_words(var.start, var.end, {}, transcript),
+                             style=var.style, intensity=var.intensity, quality=options.quality, cap_opts=vcap,
+                             aspect=options.output_aspect, editors=ed, hook_text=studio["hook_text"], title=studio["title"])
+                )  # fmt: skip
         job.analysis = {
             "engine": engine,
             "mode": mode,
@@ -582,6 +984,7 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
             "candidates": len(cands),
             "requested": want,
             "selected": len(chosen),
+            "variations": options.variations,
             "min_score": min_score,
             "best_candidate_score": best,
             "llm": llm_info,
@@ -600,6 +1003,154 @@ def _run(job_id: str, rep: JobReporter, storage: LocalStorage) -> None:
     _produce(job_id, rep, storage, options, art, plans, source, has_speech)
 
 
+def load_reference(job_id: str, storage: LocalStorage, options: JobOptions, rep: JobReporter) -> dict | None:
+    """/referencia: measure the uploaded reference video once per job (cached in the analysis dir)."""
+    ed = options.editors.referencia
+    if not ed.enabled or not ed.asset:
+        return None
+    from .reference import analyze_reference
+    from .studio import asset_path
+
+    path = asset_path(storage.job_dir(job_id), ed.asset, "reference")
+    if path is None:
+        rep.log("/referencia: the reference video was not found; edited without it.", "warn")
+        return None
+    cache_file = storage.analysis_dir(job_id) / f"reference-{ed.asset}.json"
+    try:
+        return json.loads(cache_file.read_text())
+    except (OSError, ValueError):
+        pass
+    try:
+        info = analyze_reference(path, _family(path))
+    except (FFmpegError, ProbeError, ValueError) as exc:
+        rep.log(f"/referencia: the reference could not be analysed ({exc}); edited without it.", "warn")
+        return None
+    cache_file.write_text(json.dumps(info))
+    m = info["measured"]
+    rep.log(
+        f"Reference measured: {m['shots_per_min']} shot changes/min, avg shot {m['avg_shot_s']} s, "
+        f"pauses p75 {m.get('pause_p75_s')} s, text band {m.get('text_band')}."
+    )
+    with session_scope() as s:
+        job = s.get(Job, job_id)
+        job.analysis = {**(job.analysis or {}), "reference": info}
+    return info
+
+
+def _growth_after_framing(g: dict, cp: ClipPlan, art: Artifacts, options: JobOptions) -> dict:
+    """Fill in what is only known after editing: category (content profile) and chapters."""
+    g = dict(g)
+    cat = cp.profile.name if cp.profile else "general"
+    g["category"] = cat
+    g["hashtags"] = growth.hashtags(g.get("keywords", []), cat)
+    if cp.aspect == "16:9" and cp.segments:
+        from .render import output_fps, segments_time_map
+
+        tmap = segments_time_map(cp.segments, output_fps(art.media))
+        sents = build_sentences(art.transcript.words, art.transcript.language)
+        # the topic segmentation the scorer already uses (vocabulary shift + pauses between sentences)
+        ctx = AnalysisContext.build(
+            art.transcript.words, sents, art.transcript.language, art.audio, art.visual, art.media
+        )
+        g["chapters"] = growth.chapters(sents, ctx.breaks, tmap.clamp_to_output, cp.start, cp.end)
+    return g
+
+
+def build_compilation(job_id: str, storage: LocalStorage, rep: JobReporter, cancelled) -> None:  # noqa: ANN001
+    """Ranking compilation: the rendered main versions, weakest first, joined without re-encoding.
+
+    Every item was rendered with the same encoder settings, size and frame rate, so the MP4s are
+    concatenated by stream copy (no quality loss, seconds of work); the result is verified like
+    any clip and stored as an extra clip (rank 0).
+    """
+    import subprocess
+
+    with session_scope() as s:
+        job = s.get(Job, job_id)
+        items = [
+            c for c in job.clips
+            if c.status == "ready" and not (c.edit or {}).get("variant") and (c.edit or {}).get("kind") != "compilation"
+        ]  # fmt: skip
+        items.sort(key=lambda c: -c.rank)  # countdown: #N ... #1
+        files = [storage.clip_file(job_id, c.id, c.version, "video") for c in items]
+        qa0 = dict(items[0].qa or {}) if items else {}
+        comp = Clip(job_id=job_id, rank=0, status="rendering", start=0.0, end=0.0, version=1,
+                    explanation=f"Ranking compilation of {len(items)} moments, counted down from #{len(items)} to #1.",
+                    titles=[f"Top {len(items)}"], edit={"kind": "compilation", "items": [c.id for c in items]})  # fmt: skip
+        s.add(comp)
+        s.flush()
+        comp_id = comp.id
+    if len(files) < 2:
+        with session_scope() as s:
+            s.delete(s.get(Clip, comp_id))
+        rep.log("Compilation needs at least two rendered clips.", "warn")
+        return
+    out = storage.clip_file(job_id, comp_id, 1, "video")
+    lst = out.with_suffix(".txt")
+    lst.write_text("".join(f"file '{f.resolve().as_posix()}'\n" for f in files))  # "/" works on Windows too
+    res = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
+         "-c", "copy", "-movflags", "+faststart", str(out)],
+        capture_output=True, timeout=600, check=False,
+    )  # fmt: skip
+    lst.unlink(missing_ok=True)
+    total = sum(float((c.qa or {}).get("duration", 0)) for c in items)
+    report = (
+        verify_clip(out, expected_width=qa0.get("width"), expected_height=qa0.get("height"), expected_duration=total,
+                    expected_fps=(qa0.get("render") or {}).get("fps", "30/1"), source_has_audio=True)
+        if res.returncode == 0 else {"passed": False, "checks": {"concat": False}}
+    )  # fmt: skip
+    with session_scope() as s:
+        comp = s.get(Clip, comp_id)
+        if report.get("passed"):
+            comp.status, comp.qa, comp.duration, comp.progress = "ready", report, report["duration"], 1.0
+            try:
+                make_thumbnail(out, storage.clip_file(job_id, comp_id, 1, "thumb"), at=1.0)
+            except FFmpegError:
+                pass
+            rep.log(
+                f"Compilation ready: {len(files)} moments, {report['duration']:.1f}s, joined without re-encoding."
+            )
+        else:
+            comp.status, comp.error = "failed", "The compilation could not be assembled."
+            out.unlink(missing_ok=True)
+            rep.log("Compilation failed: " + res.stderr.decode("utf-8", "replace")[-300:], "error")
+
+
+def _variant_index(clip: Clip) -> int:
+    return int(((clip.edit or {}).get("variant") or {}).get("index", 1))
+
+
+def plan_from_clip(clip: Clip, art: Artifacts, options: JobOptions, version: int | None = None) -> ClipPlan:
+    """A ClipPlan from a stored clip: its own edits (style, intensity, captions) over the job's options."""
+    edit = dict(clip.edit or {})
+    return ClipPlan(
+        clip.id,
+        clip.start,
+        clip.end,
+        effective_words(clip.start, clip.end, dict(clip.text_edits or {}), art.transcript),
+        version=clip.version if version is None else version,
+        style=edit.get("style", options.style),
+        intensity=edit.get("intensity", options.intensity),
+        quality=edit.get("quality", options.quality),
+        cap_opts=CaptionOptions.model_validate(clip.captions or {}) if clip.captions else options.captions,
+        aspect=edit.get("aspect", options.output_aspect),
+        editors=clip_editors(options, edit),
+        hook_text=edit.get("hook_text", ""),
+        title=edit.get("title", ""),
+        rank_label=edit.get("rank_label", ""),
+    )
+
+
+def clip_editors(options: JobOptions, edit: dict) -> EditorsConfig:
+    """The job's editor settings with this clip's own overrides (studio edits) on top."""
+    base = options.editors.model_dump(by_alias=True)
+    for key, cfg in (edit.get("editors") or {}).items():
+        if isinstance(cfg, dict):
+            base[key] = {**base.get(key, {}), **cfg}
+    return EditorsConfig.model_validate(base)
+
+
 def _resume(job_id: str, rep: JobReporter, storage: LocalStorage, options: JobOptions, source: Path) -> None:
     """Continue a job that was paused for transcript review: render with the corrected words."""
     with session_scope() as s:
@@ -607,13 +1158,8 @@ def _resume(job_id: str, rep: JobReporter, storage: LocalStorage, options: JobOp
         media = MediaInfo.from_dict(job.media)
         art = Artifacts.load(storage.analysis_dir(job_id), media)
         plans = [
-            ClipPlan(
-                c.id,
-                c.start,
-                c.end,
-                effective_words(c.start, c.end, dict(c.text_edits or {}), art.transcript),
-            )
-            for c in sorted(job.clips, key=lambda c: c.rank)
+            plan_from_clip(c, art, options)
+            for c in sorted(job.clips, key=lambda c: (c.rank, _variant_index(c)))
         ]
         job.analysis = {**(job.analysis or {}), "review": "done"}
     rep.log("Resuming with the reviewed transcript.")
@@ -643,9 +1189,13 @@ def _produce(
 
     # ---- 5. syncing: word timestamps re-timed against the waveform ----------------------
     n = len(plans)
+    memo = ClipCache(storage.analysis_dir(job_id) / "clips")
+    reference = load_reference(job_id, storage, options, rep)
+    for cp in plans:
+        cp.reference = reference
     rep.start("syncing")
     for i, cp in enumerate(plans):
-        info = step_align(cp, art, source, cancelled)
+        info = step_align(cp, art, source, cancelled, memo)
         rep.progress((i + 1) / n, force=True)
         if info.get("method") == "ctc":
             rep.log(
@@ -668,11 +1218,19 @@ def _produce(
             cancelled,
             user_style=options.style,
             smart_zoom=options.smart_zoom,
+            memo=memo,
         )
+        rec = _recommendation(cp, art)
         with session_scope() as s:
             clip = s.get(Clip, cp.clip_id)
             clip.framing = framing_json(cp)
             clip.duration = round(cp.duration, 3)
+            clip.edit = {**(clip.edit or {}), "recommendation": rec(clip)}
+            if clip.edit.get("growth"):
+                clip.edit = {
+                    **clip.edit,
+                    "growth": _growth_after_framing(clip.edit["growth"], cp, art, options),
+                }
         removed = (cp.end - cp.start) - cp.duration
         rep.log(
             f"Clip {i + 1}: layout {'/'.join(sorted({s_.layout['type'] for s_ in cp.plan.shots}))}, "
@@ -683,56 +1241,99 @@ def _produce(
             raise Cancelled()
     rep.finish()
 
-    # ---- 7. subtitles -----------------------------------------------------------------
-    if has_speech:
+    # ---- 7. subtitles and on-screen editors (titles, motion graphics also work without speech)
+    ed = options.editors
+    overlays_on = (
+        ed.lettering.enabled
+        or ed.animacao.enabled
+        or ed.texto_atras.enabled
+        or options.content_type == "compilation"
+    )
+    if has_speech or overlays_on:
         rep.start("subtitles")
         for i, cp in enumerate(plans):
-            pages = step_captions(cp, art, storage, job_id, options.captions, options.platform)
+            pages = step_captions(
+                cp, art, storage, job_id, cp.cap_opts or options.captions, options.caption_platform
+            )
             with session_scope() as s:
                 clip = s.get(Clip, cp.clip_id)
                 clip.pages = pages
                 clip.framing = framing_json(cp)
             rep.progress((i + 1) / n, force=True)
-        rep.log(
-            "Captions burned in and SRT written."
-            if options.captions.enabled
-            else "Burn-in disabled: SRT sidecar files written only."
-        )
+        if has_speech:
+            rep.log(
+                "Captions burned in and SRT written."
+                if options.captions.enabled
+                else "Burn-in disabled: SRT sidecar files written only."
+            )
         rep.finish()
     else:
         rep.finish("subtitles", skipped=True)
 
     # ---- 8. rendering -----------------------------------------------------------------
     rep.start("rendering")
-    ready = 0
-    for i, cp in enumerate(plans):
+    # Clips are rendered one at a time unless the profile allows more (TURBO on a machine with
+    # the cores and memory for it): each render already uses the profile's thread budget, so
+    # parallel renders split the budget instead of oversubscribing the CPU.
+    workers = max(1, min(active_plan().render_workers, n))
+    lock = threading.Lock()
+    done_frac = [0.0] * n
+
+    def report_progress(i: int):  # noqa: ANN202
+        def f(p: float) -> None:
+            with lock:
+                done_frac[i] = max(done_frac[i], 0.97 * p)
+                rep.progress(sum(done_frac) / n)
+
+        return f
+
+    def render_one(i: int, cp: ClipPlan) -> bool:
         with session_scope() as s:
             s.get(Clip, cp.clip_id).status = "rendering"
         try:
-            report = step_render(cp, art, source, storage, job_id, rep.sub(i / n, (i + 0.97) / n), cancelled)
-        except Cancelled:
-            raise
+            report = step_render(cp, art, source, storage, job_id, report_progress(i), cancelled, memo)
         except (FFmpegError, QAError) as exc:
-            rep.log(f"Clip {i + 1} failed: {exc}", "error")
+            with lock:
+                rep.log(f"Clip {i + 1} failed: {exc}", "error")
             with session_scope() as s:
                 clip = s.get(Clip, cp.clip_id)
                 clip.status = "failed"
                 clip.error = "This clip could not be rendered."
-            continue
+            return False
         with session_scope() as s:
             clip = s.get(Clip, cp.clip_id)
             clip.status = "ready"
             clip.progress = 1.0
             clip.qa = report
             clip.duration = report["duration"]
-        ready += 1
-        rep.log(
-            f"Clip {i + 1} rendered and verified: {report['width']}x{report['height']}, {report['duration']:.1f}s, {report['size_bytes'] / 1e6:.1f} MB."
-        )
-        rep.progress((i + 1) / n, force=True)
+            clip.framing = framing_json(cp)  # includes what the render-time editors did
+        with lock:
+            done_frac[i] = 1.0
+            rep.log(
+                f"Clip {i + 1} rendered and verified: {report['width']}x{report['height']}, {report['duration']:.1f}s, {report['size_bytes'] / 1e6:.1f} MB."
+            )
+            rep.progress(sum(done_frac) / n, force=True)
+        return True
+
+    if workers == 1:
+        ready = sum(render_one(i, cp) for i, cp in enumerate(plans))
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        rep.log(f"Rendering {workers} clips at a time ({active_plan().profile} profile).")
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="render") as pool:
+            futures = [pool.submit(render_one, i, cp) for i, cp in enumerate(plans)]
+            try:
+                ready = sum(f.result() for f in futures)
+            except BaseException:
+                for f in futures:
+                    f.cancel()
+                raise
     rep.finish()
     if ready == 0:
         raise UserFacingError("None of the selected clips could be rendered.")
+    if options.content_type == "compilation":
+        build_compilation(job_id, storage, rep, cancelled)
 
     rep.start("ready")
     rep.finish()
@@ -761,8 +1362,11 @@ def rerender_clip(job_id: str, clip_id: str) -> None:
             framing_mode, smart_trim = clip.framing_mode, clip.smart_trim
             new_version = clip.version + 1
         art = Artifacts.load(storage.analysis_dir(job_id), media)
-        words = effective_words(start, end, text_edits, art.transcript)
-        cp = ClipPlan(clip_id, start, end, words, version=new_version)
+        with session_scope() as s:
+            cp = plan_from_clip(s.get(Clip, clip_id), art, options, version=new_version)
+        cp.cap_opts = cap_opts
+        words = cp.words
+        cp.reference = load_reference(job_id, storage, options, JobReporter(job_id))
 
         def prog(lo: float, hi: float):
             def f(p: float) -> None:
@@ -773,13 +1377,15 @@ def rerender_clip(job_id: str, clip_id: str) -> None:
 
             return _throttle(f)
 
-        step_align(cp, art, source)
+        memo = ClipCache(storage.analysis_dir(job_id) / "clips")
+        step_align(cp, art, source, memo=memo)
         step_framing(
             cp, art, source, framing_mode, options.trim_max_pause, smart_trim, prog(0.0, 0.2),
-            user_style=options.style, smart_zoom=options.smart_zoom,
+            user_style=options.style, smart_zoom=options.smart_zoom, memo=memo,
         )  # fmt: skip
-        pages = step_captions(cp, art, storage, job_id, cap_opts, options.platform)
-        report = step_render(cp, art, source, storage, job_id, prog(0.2, 1.0))
+        pages = step_captions(cp, art, storage, job_id, cap_opts, options.caption_platform)
+        report = step_render(cp, art, source, storage, job_id, prog(0.2, 1.0), memo=memo)
+        rec = _recommendation(cp, art)
         with session_scope() as s:
             clip = s.get(Clip, clip_id)
             old_version = clip.version
@@ -788,9 +1394,10 @@ def rerender_clip(job_id: str, clip_id: str) -> None:
             clip.progress = 1.0
             clip.error = ""
             clip.pages = pages
-            clip.framing = framing_json(cp)
+            clip.framing = framing_json(cp)  # after rendering: includes the render-time editors
             clip.qa = report
             clip.duration = report["duration"]
+            clip.edit = {**(clip.edit or {}), "recommendation": rec(clip)}
             # corrections are now keyed to this exact word list
             clip.text_edits = (
                 {

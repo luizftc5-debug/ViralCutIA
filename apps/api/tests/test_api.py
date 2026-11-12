@@ -19,11 +19,17 @@ def test_health_and_config(client):
     assert cfg["limits"]["formats"] == ["MP4", "MOV", "MKV", "WEBM"]
     assert [s["key"] for s in cfg["caption_styles"]] == [
         "viral_dynamic",
-        "high_retention",
+        "energy",
+        "podcast",
+        "kinetic",
         "clean_editorial",
-        "dynamic_creator",
         "gaming",
+        "cinematic",
+        "high_retention",
+        "dynamic_creator",
     ]
+    assert [s["key"] for s in cfg["video_styles"]][:2] == ["auto", "viral"] and len(cfg["video_styles"]) == 10
+    assert cfg["performance"]["default"] in ("eco", "balanced", "turbo")
     assert cfg["engine"]["llm_enabled"] is False and cfg["engine"]["narrative_analysis"] == "heuristic"
 
 

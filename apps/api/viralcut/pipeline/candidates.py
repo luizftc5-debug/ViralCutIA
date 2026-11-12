@@ -124,3 +124,40 @@ def signal_candidates(
         if end - a >= min(min_d, media_duration):
             out.append(Candidate(a, end, kind="signal"))
     return out
+
+
+def long_candidates(
+    sentences: list[Sentence],
+    words: list[Word],
+    media_duration: float,
+    min_d: float,
+    max_d: float,
+    budget: int = 1500,
+) -> list[Candidate]:
+    """Sentence-aligned spans for long-form (minutes): the same spans as ``speech_candidates`` but
+    with starts and ends sub-sampled so the count stays bounded (scoring cost is linear in it).
+    A source shorter than the requested maximum is offered whole."""
+    n = len(sentences)
+    if n == 0:
+        return []
+    total = sentences[-1].end - sentences[0].start
+    if total <= max_d:
+        st, en = clip_bounds(sentences, words, 0, n - 1, media_duration)
+        return [Candidate(st, en, s0=0, s1=n - 1, text=" ".join(s.text for s in sentences))]
+    stride = 1
+    while True:
+        out: list[Candidate] = []
+        for i in range(0, n, stride):
+            for j in range(i, n, stride):
+                dur = sentences[j].end - sentences[i].start
+                if dur > max_d:
+                    break
+                if dur >= min_d:
+                    st, en = clip_bounds(sentences, words, i, j, media_duration)
+                    out.append(Candidate(st, en, s0=i, s1=j))
+        if len(out) <= budget:
+            break
+        stride += 1
+    for c in out:
+        c.text = " ".join(s.text for s in sentences[c.s0 : c.s1 + 1])
+    return out

@@ -33,6 +33,9 @@ export function SiteHeader({ studio = false }: { studio?: boolean }) {
               </a>
             </>
           )}
+          <Link href="/projects" className="rounded-md px-3 py-1.5 text-muted hover:text-fg">
+            Projects
+          </Link>
           <Link href="/new" className={buttonClass(studio ? "secondary" : "primary", "sm")}>
             {studio ? "New video" : "Open studio"}
           </Link>

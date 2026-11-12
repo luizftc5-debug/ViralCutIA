@@ -94,6 +94,8 @@ class Clip(Base):
     smart_trim: Mapped[bool] = mapped_column(Boolean, default=True)
     # render results
     framing: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # per-clip editing choices: {"style", "intensity", "variant": {...}, "recommendation": {...}}
+    edit: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True, default=dict)
     qa: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     version: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str] = mapped_column(Text, default="")
@@ -159,8 +161,25 @@ def get_engine() -> Engine:
                 cur.close()
 
         Base.metadata.create_all(_engine)
+        _add_missing_columns(_engine)
         _SessionLocal = sessionmaker(_engine, expire_on_commit=False)
     return _engine
+
+
+# Columns added after the first release: (table, column, SQL type). create_all() does not alter
+# existing tables, so a database created by an older version gets them here (nullable, no data
+# rewrite), on SQLite and PostgreSQL alike.
+_LATER_COLUMNS = [("clips", "edit", "JSON")]
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    for table, column, sql_type in _LATER_COLUMNS:
+        if column not in {c["name"] for c in insp.get_columns(table)}:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
 
 
 def reset_engine() -> None:
