@@ -102,3 +102,13 @@ def test_enhancement_does_not_mutate_input():
     out, rep = A.enhance_for_asr(x, A.analyze_audio(x), "auto")
     assert np.array_equal(x, before)
     assert rep["applied"] and float(np.sqrt(np.mean(out**2))) > float(np.sqrt(np.mean(x**2)))
+
+
+def test_unsupported_compute_type_falls_back_to_a_supported_one():
+    from viralcut.pipeline.transcribe import _load_attempts, _supported_compute
+
+    # the CPU has no FP16 types: int8_float16 must turn into the closest type it does have
+    assert _supported_compute("cpu", "int8_float16") == "int8_float32"
+    assert _supported_compute("cpu", "int8") == "int8"
+    # a GPU that still rejects the type at load time ends on the CPU instead of failing
+    assert _load_attempts("cuda", "int8_float16")[-1] == ("cpu", "int8")

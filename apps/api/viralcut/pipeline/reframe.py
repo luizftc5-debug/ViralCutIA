@@ -403,10 +403,12 @@ def plan_framing(
     samples: list[tuple[float, list]] = []
     with tempfile.TemporaryDirectory(prefix="vc-reframe-") as tmp:
         cuts_file = Path(tmp) / "cuts.txt"
+        # frame 0 always passes the select: ffmpeg 7+ aborts the whole command when an output gets
+        # no frames at all (a clip without shot changes); t=0 is dropped by the parser below anyway
         graph = (
             f"[0:v]split[a][b];"
             f"[a]fps={SAMPLE_FPS},scale={dw}:{dh}:flags=bilinear,format=bgr24[det];"
-            f"[b]scale=160:-2:flags=fast_bilinear,select='gt(scene,0.32)',metadata=print:file={cuts_file.name}[cut]"
+            f"[b]scale=160:-2:flags=fast_bilinear,select='gt(scene,0.32)+eq(n,0)',metadata=print:file={cuts_file.name}[cut]"
         )
         args = [
             *input_args(Path(path).resolve(), family, seek=start, duration=duration),

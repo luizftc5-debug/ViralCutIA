@@ -123,7 +123,40 @@ def _resolve_device() -> tuple[str, str]:
             compute = "int8_float16" if free is not None and free < 5.0 else "float16"
         else:
             compute = "int8"
-    return device, compute
+    return device, _supported_compute(device, compute)
+
+
+# most to least preferred; older GPUs (e.g. GTX 10xx) lack the FP16 types
+_COMPUTE_ORDER = ("int8_float16", "float16", "int8_float32", "int8", "float32")
+
+
+def _supported_compute(device: str, wanted: str) -> str:
+    """``wanted`` if the device supports it, else the closest type it does support."""
+    try:
+        import ctranslate2
+
+        supported = set(ctranslate2.get_supported_compute_types(device))
+    except Exception:
+        return wanted
+    if not supported or wanted in supported:
+        return wanted
+    start = _COMPUTE_ORDER.index(wanted) if wanted in _COMPUTE_ORDER else 0
+    for c in (*_COMPUTE_ORDER[start:], *_COMPUTE_ORDER[:start]):
+        if c in supported:
+            log.info("compute type %s not supported on %s, using %s", wanted, device, c)
+            return c
+    return wanted
+
+
+def _load_attempts(device: str, compute: str) -> list[tuple[str, str]]:
+    """(device, compute type) pairs to try: the planned one, then safer ones, then the CPU."""
+    attempts = [(device, compute)]
+    if device == "cuda":
+        attempts += [("cuda", c) for c in ("int8_float32", "float32") if c != compute]
+        attempts.append(("cpu", "int8"))
+    elif compute != "int8":
+        attempts.append(("cpu", "int8"))
+    return attempts
 
 
 @dataclass(frozen=True)
@@ -186,20 +219,26 @@ def load_model(name: str | None = None):
         for candidate in chain:
             if candidate in _models:
                 return _models[candidate], candidate
-            try:
-                kwargs = {"device": device, "compute_type": compute}
-                if device == "cpu":
-                    kwargs["cpu_threads"] = active_plan().asr_threads
-                if s.models_dir:
-                    kwargs["download_root"] = str(s.models_dir)
-                model = WhisperModel(candidate, **kwargs)
+            # a GPU/driver that rejects a compute type must not cost the transcription:
+            # try safer types, then the CPU, before falling back to a smaller model
+            for dev, comp in _load_attempts(device, compute):
+                try:
+                    kwargs = {"device": dev, "compute_type": comp}
+                    if dev == "cpu":
+                        kwargs["cpu_threads"] = active_plan().asr_threads
+                    if s.models_dir:
+                        kwargs["download_root"] = str(s.models_dir)
+                    model = WhisperModel(candidate, **kwargs)
+                except Exception as exc:
+                    last = exc
+                    log.warning("could not load Whisper model %r (%s/%s): %s", candidate, dev, comp, exc)
+                    continue
                 _models[candidate] = model
                 if candidate != wanted:
                     log.warning("Whisper model %r unavailable, fell back to %r", wanted, candidate)
+                if (dev, comp) != (device, compute):
+                    log.warning("Whisper running on %s/%s instead of %s/%s", dev, comp, device, compute)
                 return model, candidate
-            except Exception as exc:
-                last = exc
-                log.warning("could not load Whisper model %r: %s", candidate, exc)
     raise TranscriptionUnavailable(f"no Whisper model could be loaded ({last})")
 
 
