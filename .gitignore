@@ -22,6 +22,8 @@ data/
 *.db-shm
 *.db-wal
 models-cache/
+/models/
+/.cache/
 
 # Environment / secrets
 .env
@@ -41,4 +43,3 @@ models-cache/
 .idea/
 .vscode/
 *.swp
-/models/

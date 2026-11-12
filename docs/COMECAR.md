@@ -6,7 +6,7 @@
    ```bash
    winget install Gyan.FFmpeg
    ```
-2. Deixe a pasta do projeto **fora do OneDrive** (por exemplo `C:\Dev\ViralCutIA`).
+2. Deixe a pasta do projeto **fora do OneDrive** (por exemplo `E:\Dev\ViralCutIA`).
 3. Dê dois cliques em `scripts\atualizar-viralcut.bat`. Ele cria o ambiente Python, instala a API,
    instala o site e faz o build. Rode de novo **sempre que atualizar o código** (esta versão
    adiciona a dependência `psutil` e o site precisa ser recompilado).
@@ -16,7 +16,8 @@
 Dois cliques em `scripts\iniciar-viralcut.bat`. Abrem duas janelas (API e site) e o navegador em
 http://localhost:3000. Para fechar, feche as duas janelas.
 
-No **primeiro vídeo**, o modelo de fala é baixado (~1,6 GB) e os de sincronização (~240–380 MB).
+No **primeiro vídeo**, o modelo de fala é baixado (~1,6 GB) e os de sincronização (~240–380 MB),
+para `E:\Dev\ViralCutIA\models`. Durante o download a transcrição fica em 0%: é normal.
 O modelo de recorte de pessoa (25 MB) só é baixado se você usar `/tela-verde` (IA) ou
 `/texto-atras`.
 
@@ -48,7 +49,23 @@ Em *Advanced → Processing mode*:
 A qualidade final é a mesma nos três. Os editores marcados *heavy* (`/3d` forte, `/tela-verde`
 por IA, `/texto-atras`) aumentam o tempo de render; deixe-os desligados quando não precisar.
 
-## 5. Bom saber
+## 5. Onde ficam os arquivos
+
+Tudo fica **dentro da pasta do projeto** (`E:\Dev\ViralCutIA`); nada vai para o `C:`:
+
+| O quê | Pasta |
+|---|---|
+| Vídeos enviados, clipes, banco de dados, cache de transcrições | `apps\api\data` |
+| Arquivos temporários (reenquadramento, prévias, ZIPs) | `apps\api\data\tmp` |
+| Modelos de IA baixados (~2 GB) | `models` |
+| Cache de downloads do pip e do npm | `.cache` |
+| Configuração (`.env`) | `apps\api\.env` |
+
+Se mover o projeto para outra pasta ou disco, tudo vai junto: os caminhos são relativos à pasta
+do projeto. Depois de mover, rode `scripts\atualizar-viralcut.bat` uma vez (o ambiente Python
+guarda o caminho antigo). Para usar outra pasta de modelos, defina `VIRALCUT_MODELS_DIR` no `.env`.
+
+## 6. Bom saber
 
 * Os arquivos são apagados automaticamente após 24 h (`VIRALCUT_RETENTION_HOURS` no `.env`).
 * Nada é publicado automaticamente. Use músicas e imagens que você tenha direito de usar.
